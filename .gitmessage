@@ -1,0 +1,24 @@
+# <type>(<scope>): <subject>
+#
+# ── Subject ──────────────────────────────────────────────────────────────────
+#   imperative mood, lowercase, no trailing period, header <= 72 chars
+#   types : feat fix docs test refactor perf build ci chore revert
+#   scopes: core transport session routes clients services server
+#           accounts cdp http proxy profile post search message
+#           tools tests ci docs deps release
+#   examples:
+#     feat(search): paginate results with page_info.end_cursor
+#     fix(accounts): keep cookies out of the repository
+#     docs: document the incognito test matrix
+#
+# ── Body (optional, blank line above) ────────────────────────────────────────
+#   Why is this change needed? What was wrong before?
+#   How does behaviour change? Anything reviewers must verify?
+#   Wrap at 100 characters.
+#
+#
+# ── Footer (optional, blank line above) ──────────────────────────────────────
+#   Refs: #123
+#   BREAKING CHANGE: what breaks and how to migrate
+#
+# Lines starting with '#' are ignored. Hooks: `make hooks`.

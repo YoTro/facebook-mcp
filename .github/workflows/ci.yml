@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # Fast feedback: lint/format/dependency rules need no test matrix.
+  lint:
+    name: lint & architecture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # commit-message validation needs history
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check src tools tests
+
+      - name: Ruff format
+        run: ruff format --check src tools tests
+
+      - name: Layered import rules
+        run: python tools/check_layers.py
+
+      - name: Commit message convention
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python tools/commit_msg.py --range "origin/${BASE_REF}..HEAD"
+
+      - name: Verify credentials never live in the repo
+        run: |
+          set -euo pipefail
+          # The account store must stay outside the working tree.
+          if [ -d ".facebook-mcp" ] || [ -f "cookies.txt" ]; then
+            echo "::error::credential files must not be committed"
+            exit 1
+          fi
+          if git ls-files | grep -Ei '(^|/)(cookies\.txt|account\.json|\.env)$'; then
+            echo "::error::credential/secret files are tracked by git"
+            exit 1
+          fi
+
+  test:
+    name: test (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+          # macOS is the primary development platform (system proxy, Chrome).
+          - { os: macos-latest, python: "3.11" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        # Tests are fully offline: local HTTP server + mock DevTools server.
+        # Any accidental network call would be slow/fragile, so fail fast.
+        env:
+          FB_HOME: ${{ runner.temp }}/fb-home
+        run: python -m pytest -q --durations=10
+
+      - name: Smoke-test the MCP server over stdio
+        env:
+          FB_HOME: ${{ runner.temp }}/fb-home
+        run: python tools/smoke_mcp.py
+
+  package:
+    name: build & install wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Assert package data is included
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import zipfile, pathlib
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              "facebook_mcp/server.py",
+              "facebook_mcp/routes/templates/search_results.json",
+          ]
+          missing = [r for r in required if r not in names]
+          assert not missing, f"{wheel.name} is missing: {missing}"
+          print(f"{wheel.name}: {len(names)} entries, templates present")
+          PY
+
+      - name: Install the wheel in a clean env
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/venv-wheel
+          /tmp/venv-wheel/bin/pip install --quiet dist/*.whl
+          /tmp/venv-wheel/bin/python -c "
+          import facebook_mcp, facebook_mcp.server
+          from facebook_mcp.routes.templates import build_search_variables
+          v = build_search_variables('pest control', 'pages', 5)
+          assert v['args']['text'] == 'pest control'
+          print('wheel import OK:', facebook_mcp.__version__)
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error

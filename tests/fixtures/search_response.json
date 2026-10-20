@@ -1,0 +1,85 @@
+{
+  "data": {
+    "serpResponse": {
+      "results": {
+        "edges": [
+          {
+            "rendering_strategy": {
+              "__typename": "XFBSearchListCellProfileRenderingStrategy",
+              "view_model": {
+                "__typename": "SearchProfileViewModel",
+                "profile": {
+                  "__typename": "User",
+                  "id": "100000000000010",
+                  "name": "Pest control",
+                  "url": "https://www.facebook.com/rpmpests",
+                  "profile_url": "https://www.facebook.com/rpmpests",
+                  "is_verified": false,
+                  "profile_picture": {
+                    "uri": "https://scontent.example/fb/100000000000010.jpg"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "rendering_strategy": {
+              "view_model": {
+                "profile": {
+                  "__typename": "Page",
+                  "id": "987654321",
+                  "name": "Perth Pest Control",
+                  "url": "https://www.facebook.com/perthpestcontrol",
+                  "is_verified": true,
+                  "category_name": "Pest Control Service",
+                  "profile_picture": { "uri": "https://scontent.example/fb/987654321.jpg" }
+                }
+              }
+            }
+          },
+          {
+            "rendering_strategy": {
+              "view_model": {
+                "profile": {
+                  "__typename": "User",
+                  "id": "100000000000010",
+                  "name": "Pest control (duplicate)",
+                  "url": "https://www.facebook.com/rpmpests"
+                }
+              }
+            }
+          },
+          {
+            "rendering_strategy": { "view_model": { "profile": null } }
+          },
+          {
+            "rendering_strategy": {
+              "view_model": {
+                "profile": { "__typename": "User", "name": "No id here" }
+              }
+            }
+          },
+          {
+            "rendering_strategy": {
+              "view_model": {
+                "profile": {
+                  "__typename": "User",
+                  "id": "555000111",
+                  "name": "Pest Control News Ltd",
+                  "url": "https://www.facebook.com/PestControlNewsLtd",
+                  "is_verified": false
+                }
+              }
+            }
+          }
+        ],
+        "filters": [],
+        "page_info": {
+          "has_next_page": true,
+          "end_cursor": "{\"page_number\":1,\"flow_cursors_serialized\":{}}"
+        }
+      }
+    }
+  },
+  "extensions": { "is_final": true }
+}

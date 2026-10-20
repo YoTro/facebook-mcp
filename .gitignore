@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.cache/
+.ruff_cache/
+
+# credentials must never be committed (they live in ~/.facebook-mcp)
+cookies.txt
+account.json
+.facebook-mcp/
+
+# macOS
+.DS_Store
+
+# SSH / deploy keys must never be committed
+*.pem
+id_ed25519*
+id_rsa*
+github-action-key-*
+.deploy-key*

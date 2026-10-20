@@ -1,0 +1,263 @@
+"""Account isolation tests: credential layout, resolution order, multi-account."""
+
+from __future__ import annotations
+
+import asyncio
+import stat
+from pathlib import Path
+
+import pytest
+
+from facebook_mcp.core.accounts import (
+    AccountNameError,
+    AccountPaths,
+    list_accounts,
+    resolve_home,
+    validate_account_name,
+)
+from facebook_mcp.core.config import Settings
+from facebook_mcp.session.manager import SessionManager
+
+NETSCAPE = (
+    "# Netscape HTTP Cookie File\n"
+    ".facebook.com\tTRUE\t/\tTRUE\t0\tc_user\t123\n"
+    ".facebook.com\tTRUE\t/\tTRUE\t0\txs\ttok\n"
+)
+
+
+# --- name validation -----------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["default", "work", "acct_2", "a.b-c", "A1"])
+def test_valid_account_names(name: str) -> None:
+    assert validate_account_name(name) == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", " ", "../escape", "a/b", ".hidden", "-dash", "x" * 65, "with space", "semi;colon"],
+)
+def test_invalid_account_names(name: str) -> None:
+    with pytest.raises(AccountNameError):
+        validate_account_name(name)
+
+
+def test_account_paths_rejects_bad_name() -> None:
+    with pytest.raises(AccountNameError):
+        AccountPaths(home=Path("/tmp"), name="../x")
+
+
+# --- home resolution -----------------------------------------------------
+
+
+def test_resolve_home_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("FB_HOME", raising=False)
+    assert resolve_home() == Path.home() / ".facebook-mcp"
+
+
+def test_resolve_home_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    assert resolve_home() == tmp_path
+
+
+def test_resolve_home_explicit_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path / "env"))
+    assert resolve_home(tmp_path / "explicit") == tmp_path / "explicit"
+
+
+# --- layout & permissions ------------------------------------------------
+
+
+def test_layout_paths(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("work", tmp_path)
+    assert paths.directory == tmp_path / "accounts" / "work"
+    assert paths.cookies_file == paths.directory / "cookies.txt"
+    assert paths.meta_file == paths.directory / "account.json"
+
+
+def test_ensure_creates_private_dirs(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("work", tmp_path).ensure()
+    assert paths.directory.is_dir()
+    assert stat.S_IMODE(paths.directory.stat().st_mode) == 0o700
+
+
+def test_meta_roundtrip(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("work", tmp_path)
+    assert paths.load_meta() == {}
+    paths.merge_meta(c_user="42", cdp_url="http://127.0.0.1:9223")
+    meta = paths.load_meta()
+    assert meta["c_user"] == "42"
+    assert meta["cdp_url"] == "http://127.0.0.1:9223"
+    assert stat.S_IMODE(paths.meta_file.stat().st_mode) == 0o600
+
+
+def test_permission_warning(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("work", tmp_path).ensure()
+    paths.cookies_file.write_text(NETSCAPE)
+    paths.cookies_file.chmod(0o644)
+    assert paths.permission_warning() is not None
+
+    paths.cookies_file.chmod(0o600)
+    assert paths.permission_warning() is None
+
+
+def test_list_accounts(tmp_path: Path) -> None:
+    assert list_accounts(tmp_path) == []
+    AccountPaths.for_account("default", tmp_path).ensure()
+    AccountPaths.for_account("work", tmp_path).ensure()
+    (tmp_path / "accounts" / "not-an-account.txt").write_text("x")
+    assert list_accounts(tmp_path) == ["default", "work"]
+
+
+# --- cookie resolution order --------------------------------------------
+
+
+def _settings(tmp_path: Path, **overrides) -> Settings:
+    base = dict(
+        account="default",
+        home=str(tmp_path),
+        cookie=None,
+        cookie_file=None,
+        cdp_cookie_bootstrap=False,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_account_store_is_used_by_default(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("default", tmp_path).ensure()
+    paths.cookies_file.write_text(NETSCAPE, encoding="utf-8")
+
+    manager = SessionManager(_settings(tmp_path))
+    assert manager.is_authenticated is True
+    assert manager.state.user_id == "123"
+    assert manager.from_config is True
+
+
+def test_explicit_cookie_file_wins(tmp_path: Path) -> None:
+    store = AccountPaths.for_account("default", tmp_path).ensure()
+    store.cookies_file.write_text(NETSCAPE.replace("c_user\t123", "c_user\t999"), encoding="utf-8")
+
+    explicit = tmp_path / "explicit.txt"
+    explicit.write_text(NETSCAPE.replace("c_user\t123", "c_user\t111"), encoding="utf-8")
+
+    manager = SessionManager(_settings(tmp_path, cookie_file=str(explicit)))
+    assert manager.state.user_id == "111"
+
+
+def test_env_cookie_is_last_resort(tmp_path: Path) -> None:
+    manager = SessionManager(_settings(tmp_path, cookie="c_user=777; xs=t"))
+    assert manager.state.user_id == "777"
+    assert manager.from_config is True
+
+
+def test_no_cookies_is_anonymous(tmp_path: Path) -> None:
+    manager = SessionManager(_settings(tmp_path))
+    assert manager.is_authenticated is False
+    assert manager.from_config is False
+
+
+# --- multi-account ------------------------------------------------------
+
+
+def test_accounts_are_isolated(tmp_path: Path) -> None:
+    for name, uid in (("default", "111"), ("work", "222")):
+        paths = AccountPaths.for_account(name, tmp_path).ensure()
+        paths.cookies_file.write_text(
+            NETSCAPE.replace("c_user\t123", f"c_user\t{uid}"), encoding="utf-8"
+        )
+
+    first = SessionManager(_settings(tmp_path, account="default"))
+    second = SessionManager(_settings(tmp_path, account="work"))
+
+    assert first.state.user_id == "111"
+    assert second.state.user_id == "222"
+
+
+def test_settings_account_paths(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, account="work")
+    assert settings.account_paths().name == "work"
+    assert settings.account_paths().home == tmp_path
+
+
+def test_build_settings_applies_account_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    paths = AccountPaths.for_account("work", tmp_path).ensure()
+    paths.merge_meta(cdp_url="http://127.0.0.1:9333")
+
+    settings = factory.build_settings("work")
+    assert settings.account == "work"
+    assert settings.cdp_url == "http://127.0.0.1:9333"
+
+
+def test_get_services_returns_distinct_instances_per_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    a = factory.get_services("default")
+    b = factory.get_services("work")
+    try:
+        assert a is not b
+        assert a.account == "default"
+        assert b.account == "work"
+        # Same account returns the cached instance.
+        assert factory.get_services("default") is a
+    finally:
+        a.close()
+        b.close()
+        factory._services_for.cache_clear()
+
+
+# --- MCP surface --------------------------------------------------------
+
+
+def test_tools_accept_account_argument() -> None:
+    from facebook_mcp.server import mcp
+
+    tools = asyncio.run(mcp.list_tools())
+    assert tools
+    for tool in tools:
+        properties = tool.inputSchema.get("properties", {})
+        assert "account" in properties, f"{tool.name} is missing the account argument"
+        # Optional, so existing callers keep working.
+        assert "account" not in tool.inputSchema.get("required", [])
+
+
+def test_account_argument_reaches_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    import facebook_mcp.server as server
+    from facebook_mcp.core.models import PostTimeResult
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    seen: list[str] = []
+
+    class StubPost:
+        def get_latest_post_time(self, username: str) -> PostTimeResult:
+            seen.append(username)
+            return PostTimeResult(ok=True, username=username)
+
+    class Stub:
+        post = StubPost()
+
+    monkeypatch.setattr(server, "get_services", lambda account=None: Stub())
+
+    result = server.get_user_latest_post_time("someone", account="work")
+    assert result.ok is True
+    assert seen == ["someone"]
