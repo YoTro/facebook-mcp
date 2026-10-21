@@ -431,3 +431,46 @@ def test_mcp_tool_registered() -> None:
 
     names = {t.name for t in asyncio.run(mcp.list_tools())}
     assert "send_message" in names
+
+
+# --- live browser wins over a stale snapshot ----------------------------
+#
+# The jar is a snapshot: it can still say "Page" after the browser was switched
+# back to the personal identity. The attached browser is authoritative, so a
+# live personal session must not be blocked by the stale snapshot.
+
+
+def test_stale_page_snapshot_does_not_block_live_personal_session() -> None:
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+        live_cookies={"c_user": "1"},  # live: personal, no i_user
+    )
+    result = _page_client(cdp).send("100000000000003", "hi")
+    assert result.ok is True
+    # It went all the way to the profile fallback instead of refusing.
+    assert cdp.navigations[-1].startswith("https://www.facebook.com/profile.php?id=")
+    assert cdp.mouse_clicks == 1
+
+
+def test_empty_live_jar_falls_back_to_the_snapshot() -> None:
+    """An unreachable/empty live jar must not silently allow a Page."""
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+        live_cookies={},
+    )
+    with pytest.raises(UnsupportedError, match="acting as a Page"):
+        _page_client(cdp).send("100000000000003", "hi")
+
+
+def test_live_page_overrides_personal_snapshot() -> None:
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        live_cookies={"c_user": "1", "i_user": "9"},
+    )
+    with pytest.raises(UnsupportedError, match="acting as a Page"):
+        _client(cdp).send("100000000000003", "hi")

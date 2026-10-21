@@ -187,24 +187,29 @@ class MessageClient(BaseClient):
 
         ``state.cookies`` is a snapshot taken when the jar was exported, so an
         identity switch performed in the browser afterwards would not show up
-        there. The browser is the source of truth while it is attached, so ask
-        it before falling back to the jar. Costs one round trip, and only on the
+        there. The attached browser is therefore authoritative: ask it first and
+        consult the snapshot only when it returns nothing usable (not attached,
+        or an empty jar for this origin). Costs one round trip, and only on the
         path where the first two fallbacks already failed.
         """
-        if self._session.state.acting_as_page:
-            return True
         try:
             live = cdp.cookies()
         except CdpError as exc:
             logger.debug("could not read live cookies: %s", exc)
-            return False
-        if live.get("i_user"):
-            logger.debug(
-                "acting as a Page per the live browser (i_user); the exported "
-                "cookie jar does not include it"
-            )
-            return True
-        return False
+            live = {}
+
+        if live:
+            if live.get("i_user"):
+                logger.debug(
+                    "acting as a Page per the live browser (i_user); the exported "
+                    "cookie jar does not necessarily include it"
+                )
+                return True
+            if live.get("c_user"):
+                # A live personal identity overrides a stale "Page" snapshot.
+                return False
+
+        return self._session.state.acting_as_page
 
     def _start_from_profile(self, cdp: CdpTransport, uid: str) -> bool:
         """Open the profile and click its "Message" button."""
