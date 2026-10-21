@@ -31,7 +31,9 @@ def build_settings(account: str | None = None) -> Settings:
     """Return settings for ``account``, applying per-account overrides.
 
     ``account.json`` may carry ``cdp_url`` so each account can bind to its own
-    Chrome instance (separate profile + port) for browser-backed operations.
+    Chrome instance (separate profile + port) for browser-backed operations,
+    and ``doc_ids`` so a re-captured GraphQL ``doc_id`` takes effect without
+    editing ``routes/graphql.py``.
     """
     base = get_settings()
     if account and account != base.account:
@@ -44,9 +46,27 @@ def build_settings(account: str | None = None) -> Settings:
         value = meta.get(key)
         if isinstance(value, str) and value:
             overrides[key] = value
+    doc_ids = _clean_doc_ids(meta.get("doc_ids"))
+    if doc_ids:
+        overrides["route_doc_ids"] = doc_ids
     if overrides:
         base = base.model_copy(update=overrides)
     return base
+
+
+def _clean_doc_ids(raw: object) -> dict[str, str]:
+    """Keep only ``{op: non-empty str}`` entries from ``account.json``.
+
+    ``model_copy`` does not validate, so anything malformed is dropped here
+    rather than reaching :meth:`BaseClient._graphql` as a non-string.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(op): value.strip()
+        for op, value in raw.items()
+        if isinstance(value, str) and value.strip()
+    }
 
 
 class Services:

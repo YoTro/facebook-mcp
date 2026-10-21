@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +63,15 @@ class Settings(BaseSettings):
 
     # --- rate limiting -------------------------------------------------------
     min_request_interval: float = 2.0  # seconds between requests
+
+    # --- graphql route overrides ---------------------------------------------
+    # ``doc_id`` rotates with every Facebook frontend build, and two accounts can
+    # be served different builds. ``routes/graphql.py`` therefore only holds a
+    # bootstrap default; a re-capture (``tools/sniff.py --save-templates``)
+    # writes the live value into the account store instead, so refreshing it is
+    # never a source change. Maps semantic op -> doc_id, e.g.
+    # ``{"search.results": "39411546341825607"}``.
+    route_doc_ids: dict[str, str] = Field(default_factory=dict)
 
     @property
     def has_credentials(self) -> bool:

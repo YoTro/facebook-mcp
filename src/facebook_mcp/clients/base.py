@@ -99,6 +99,24 @@ class BaseClient:
             route, params=params, headers=headers, url=url, require_auth=require_auth
         )
 
+    def _doc_id(self, route: Route) -> str | None:
+        """Resolve the ``doc_id`` for ``route``.
+
+        Precedence: the account store (``account.json`` -> ``doc_ids``) wins
+        over the registry in ``routes/graphql.py``. The registry entry is only a
+        bootstrap default: Facebook rotates ``doc_id`` with every frontend build
+        and may serve different builds to different accounts, so the live value
+        lives in the credential store, where refreshing it needs no commit.
+        """
+        override = None
+        if self._settings is not None:
+            override = self._settings.route_doc_ids.get(route.op)
+        if override:
+            if override != route.doc_id:
+                logger.debug("doc_id for %s from account store: %s", route.op, override)
+            return override
+        return route.doc_id
+
     def _graphql(
         self,
         route: Route,
@@ -106,7 +124,8 @@ class BaseClient:
         *,
         friendly_name: str | None = None,
     ) -> dict[str, object]:
-        if not route.doc_id:
+        doc_id = self._doc_id(route)
+        if not doc_id:
             raise AuthError(
                 f"GraphQL route '{route.op}' has no doc_id; capture it with tools/sniff.py"
             )
@@ -124,7 +143,7 @@ class BaseClient:
             # jazoest is derived from fb_dtsg: "2" followed by the sum of the
             # character codes. Verified against live traffic.
             "jazoest": "2" + str(sum(ord(c) for c in dtsg)),
-            "doc_id": route.doc_id,
+            "doc_id": doc_id,
             "fb_api_caller_class": "RelayModern",
             "fb_api_req_friendly_name": friendly_name or route.friendly_name or "",
             "variables": _json_dumps(variables),
