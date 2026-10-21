@@ -47,10 +47,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_TEMPLATES = REPO_ROOT / "src/facebook_mcp/routes/templates"
 
 # Only captured queries with a consumer in ``routes/templates/__init__.py`` are
-# promoted into the package. Everything else is already recorded in ``--out``;
-# copying it into ``routes/templates/`` would ship dead captures — including
-# session-derived ids — inside the wheel.
-PROMOTED_TEMPLATES = frozenset({"SearchCometResultsPaginatedResultsQuery"})
+# promoted into the package, and each one maps to the file that consumer reads.
+# Everything else stays in ``--out``; copying it into ``routes/templates/`` would
+# ship dead captures — including session-derived ids — inside the wheel.
+PROMOTED_TEMPLATES: dict[str, str] = {
+    "SearchCometResultsPaginatedResultsQuery": "search_results.json",
+}
 
 
 def _form_fields(post_data: str | None) -> dict[str, str]:
@@ -199,10 +201,11 @@ def _save_template(friendly_name: str, variables: object) -> Path | None:
 
     Returns the written path, or ``None`` when the capture is not promoted.
     """
-    if friendly_name not in PROMOTED_TEMPLATES:
+    filename = PROMOTED_TEMPLATES.get(friendly_name)
+    if filename is None:
         return None
 
-    target = PACKAGE_TEMPLATES / "search_results.json"
+    target = PACKAGE_TEMPLATES / filename
     payload = json.loads(json.dumps(variables))
     args = payload.setdefault("args", {})
     args["text"] = "{query}"
@@ -264,7 +267,11 @@ def _write_atomic(target: Path, text: str) -> None:
 
 
 def _print_route_table(captured: dict[str, dict[str, object]]) -> None:
-    print("Paste into src/facebook_mcp/routes/graphql.py:\n")
+    print(
+        "Bootstrap defaults for src/facebook_mcp/routes/graphql.py — paste these\n"
+        "only to keep a fresh clone working. Routine rotations are absorbed by the\n"
+        "account store (account.json -> doc_ids) and must NOT be committed.\n"
+    )
     for entry in captured.values():
         name = _const_name(str(entry["friendly_name"] or "UNKNOWN"))
         print(

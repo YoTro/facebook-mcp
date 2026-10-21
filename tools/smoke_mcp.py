@@ -53,10 +53,18 @@ def _reply(line: str) -> tuple[int, dict] | None:
     return message_id, message
 
 
-def _run(requests: list[dict], env: dict[str, str]) -> tuple[dict[int, dict], str]:
-    """Send ``requests`` to a fresh server and collect the JSON-RPC replies."""
+def _run(
+    requests: list[dict],
+    env: dict[str, str],
+    command: list[str] | None = None,
+) -> tuple[dict[int, dict], str]:
+    """Send ``requests`` to a fresh server and collect the JSON-RPC replies.
+
+    ``command`` defaults to ``python -m facebook_mcp``; tests pass a stub that
+    floods stderr to prove both pipes are drained.
+    """
     proc = subprocess.Popen(
-        [sys.executable, "-m", "facebook_mcp"],
+        command or [sys.executable, "-m", "facebook_mcp"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -74,8 +82,19 @@ def _run(requests: list[dict], env: dict[str, str]) -> tuple[dict[int, dict], st
             if parsed is not None:
                 replies[parsed[0]] = parsed[1]
 
+    # stderr must be drained concurrently: the server logs to stderr, and a pipe
+    # holds only ~64 KB. Reading it after ``wait()`` would let a chatty (or
+    # crashing) child block on write and look like a hung handshake.
+    stderr_chunks: list[str] = []
+
+    def drain_stderr() -> None:
+        for line in proc.stderr:  # type: ignore[union-attr]
+            stderr_chunks.append(line)
+
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
+    error_reader = threading.Thread(target=drain_stderr, daemon=True)
+    error_reader.start()
 
     try:
         for request in requests:
@@ -98,7 +117,8 @@ def _run(requests: list[dict], env: dict[str, str]) -> tuple[dict[int, dict], st
         proc.kill()
         proc.wait(timeout=5)
     reader.join(2)
-    return replies, proc.stderr.read()
+    error_reader.join(2)
+    return replies, "".join(stderr_chunks)
 
 
 def main() -> int:
