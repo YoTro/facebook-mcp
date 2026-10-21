@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..core.config import Settings
 from ..core.exceptions import (
     AuthError,
@@ -61,7 +63,10 @@ class BaseClient:
             self._session.require_auth()
 
         merged = dict(_DEFAULT_HEADERS)
-        merged.update(self._session.headers())
+        if not route.anonymous:
+            # Profile pages are fetched without credentials on purpose: the
+            # ServerJS payload only exists in the logged-out variant.
+            merged.update(self._session.headers())
         if headers:
             merged.update(headers)
 
@@ -158,10 +163,63 @@ class BaseClient:
                 "X-FB-Friendly-Name": friendly_name or route.friendly_name or "",
             },
         )
-        payload = resp.json()
+        payload = self._decode_graphql(resp, route, doc_id)
         if not isinstance(payload, dict):
-            raise AuthError(f"unexpected GraphQL payload for {route.op}")
+            raise ParseError(
+                f"{route.op}: unexpected GraphQL payload type {type(payload).__name__} "
+                f"(doc_id {doc_id}); re-capture with tools/sniff.py --save-templates"
+            )
+        self._raise_for_legacy_error(payload, route, doc_id)
         return payload
+
+    @staticmethod
+    def _decode_graphql(resp: HttpResponse, route: Route, doc_id: str) -> Any:
+        """Decode a GraphQL body, turning decode failures into ``ParseError``.
+
+        A rotated or mistyped ``doc_id`` makes Facebook answer HTTP 200 with a
+        legacy error envelope (``for (;;);{"error":1357031,...}``) instead of
+        Relay JSON, so an unhandled ``JSONDecodeError`` would hide the real
+        cause. ``HttpResponse.json`` strips the guard prefix; anything still
+        undecodable is a genuine shape change.
+        """
+        try:
+            return resp.json()
+        except ValueError:
+            snippet = resp.text[:120].replace("\n", " ")
+            raise ParseError(
+                f"{route.op}: response was not JSON ({snippet!r}); the doc_id "
+                f"{doc_id} may have rotated — re-capture with "
+                "tools/sniff.py --save-templates"
+            ) from None
+
+    def _raise_for_legacy_error(
+        self, payload: dict[str, object], route: Route, doc_id: str
+    ) -> None:
+        """Translate Facebook's legacy ``{"error": <code>, ...}`` envelope.
+
+        Relay failures use ``"errors": [...]`` (handled by
+        :meth:`_raise_for_graphql_errors`). The legacy shape appears when the
+        query id is unknown to the current build, which is the common outcome of
+        a ``doc_id`` rotation.
+        """
+        if "errors" in payload or "error" not in payload:
+            return
+
+        code = payload.get("error")
+        summary = str(payload.get("errorSummary") or "")
+        description = str(payload.get("errorDescription") or "")
+        detail = ("; ".join(part for part in (summary, description) if part) or "no details")[:160]
+
+        # 1357031 == "This content is no longer available": the query id the
+        # server was given does not exist in the build it is serving.
+        rotated = code == 1357031 or "no longer available" in detail.lower()
+        hint = (
+            f"; the doc_id {doc_id} was rejected — it has probably rotated, "
+            "re-capture with tools/sniff.py --save-templates"
+            if rotated
+            else f"; doc_id {doc_id}"
+        )
+        raise ParseError(f"{route.op}: Facebook error {code} ({detail}){hint}")
 
     def _ensure_dtsg(self) -> None:
         """Fetch the home page once to learn ``fb_dtsg`` / ``lsd`` when missing."""
@@ -204,6 +262,16 @@ class BaseClient:
         codes = [e.get("code") for e in errors if isinstance(e, dict)]
         joined = "; ".join(messages)[:400]
         lowered = joined.lower()
+
+        # A doc_id the current build does not know also arrives as a Relay
+        # error: 'The GraphQL document with ID 1 was not found.'
+        if "graphql document with id" in lowered or (
+            "document" in lowered and "not found" in lowered
+        ):
+            raise ParseError(
+                f"{op}: Facebook rejected the query id ({joined}); it has probably "
+                "rotated — re-capture with tools/sniff.py --save-templates"
+            )
 
         if "missing_required_variable" in lowered:
             raise ParseError(

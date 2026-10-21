@@ -10,6 +10,12 @@ from ..core.exceptions import HttpStatusError
 
 TransportHint = Literal["http", "cdp"]
 
+# Facebook prefixes JSON bodies of its legacy AJAX endpoints with this guard so
+# the response cannot be captured as a cross-site ``<script>`` (JSON hijacking).
+# GraphQL success bodies are clean, but every error envelope carries it — and a
+# rotated ``doc_id`` lands exactly there.
+JSON_GUARD_PREFIX = "for (;;);"
+
 
 @dataclass(frozen=True)
 class HttpRequest:
@@ -41,7 +47,11 @@ class HttpResponse:
         return 200 <= self.status_code < 300
 
     def json(self) -> Any:
-        return _json.loads(self.text)
+        """Decode the body as JSON, tolerating Facebook's anti-hijacking guard."""
+        text = self.text.lstrip()
+        if text.startswith(JSON_GUARD_PREFIX):
+            text = text[len(JSON_GUARD_PREFIX) :]
+        return _json.loads(text)
 
     def raise_for_status(self) -> HttpResponse:
         if not self.ok:

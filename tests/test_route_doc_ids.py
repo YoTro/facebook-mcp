@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from facebook_mcp.clients.base import BaseClient
 from facebook_mcp.clients.search_client import SearchClient
 from facebook_mcp.core.accounts import AccountPaths
@@ -168,3 +170,135 @@ def test_capture_without_known_routes_writes_nothing() -> None:
     captured = {"a": {"friendly_name": "Nope", "doc_id": "1"}}
     assert sniff._record_doc_ids(Settings(), captured) is None
     assert not AccountPaths.for_account("default").meta_file.exists()
+
+
+# --- error envelope for a rotated / wrong doc_id -------------------------
+#
+# Facebook answers HTTP 200 with a *legacy* envelope when the query id is
+# unknown to the build it serves:
+#   for (;;);{"__ar":1,"error":1357031,"errorSummary":"This content is no longer available",...}
+# Before this was handled the client raised a bare JSONDecodeError, which hid
+# the real cause and bypassed the project's exception hierarchy.
+
+
+class _RawRecorder(_Recorder):
+    """Transport double that returns a verbatim body and status."""
+
+    def __init__(self, text: str, status: int = 200) -> None:
+        super().__init__()
+        self._text = text
+        self._status = status
+
+    def request(self, req: Any) -> HttpResponse:
+        self.requests.append(req)
+        return HttpResponse(
+            status_code=self._status,
+            url=req.url,
+            headers={"content-type": "application/x-javascript"},
+            text=self._text,
+            content=b"",
+        )
+
+
+LEGACY_ERROR = (
+    'for (;;);{"__ar":1,"error":1357031,"errorSummary":"This content is no longer '
+    'available","errorDescription":"The content you requested cannot be displayed '
+    'right now."}'
+)
+
+
+def _client_with(text: str, status: int = 200) -> BaseClient:
+    settings = Settings(cookie="c_user=42; xs=tok", route_doc_ids={"search.results": "777"})
+    return BaseClient(_RawRecorder(text, status), _session(settings), settings)  # type: ignore[arg-type]
+
+
+def test_guard_prefix_is_stripped_by_http_response() -> None:
+    from facebook_mcp.transport.base import HttpResponse
+
+    resp = HttpResponse(200, "u", {}, 'for (;;);{"a": 1}', b"")
+    assert resp.json() == {"a": 1}
+
+
+def test_legacy_error_envelope_becomes_parse_error() -> None:
+    from facebook_mcp.core.exceptions import ParseError
+
+    client = _client_with(LEGACY_ERROR)
+    with pytest.raises(ParseError) as excinfo:
+        client._graphql(graphql.SEARCH_RESULTS, {})
+
+    message = str(excinfo.value)
+    assert "1357031" in message
+    assert "doc_id 777" in message
+    assert "tools/sniff.py" in message
+
+
+def test_search_surfaces_parse_error_not_json_decode_error() -> None:
+    from facebook_mcp.clients.search_client import SearchClient
+    from facebook_mcp.core.exceptions import ParseError
+
+    settings = Settings(cookie="c_user=42; xs=tok", route_doc_ids={"search.results": "777"})
+    client = SearchClient(_RawRecorder(LEGACY_ERROR), _session(settings), settings)
+
+    with pytest.raises(ParseError, match="1357031"):
+        client.search("pest control", SearchCategory.PAGES, 2)
+
+
+def test_unparseable_body_reports_doc_id() -> None:
+    from facebook_mcp.core.exceptions import ParseError
+
+    client = _client_with("<html>maintenance</html>")
+    with pytest.raises(ParseError, match="was not JSON"):
+        client._graphql(graphql.SEARCH_RESULTS, {})
+
+
+def test_plain_relay_payload_is_untouched() -> None:
+    client = _client_with('{"data": {"ok": true}}')
+    assert client._graphql(graphql.SEARCH_RESULTS, {}) == {"data": {"ok": True}}
+
+
+# --- template promotion is driven by an explicit mapping ------------------
+#
+# PROMOTED_TEMPLATES maps a captured query to the file its runtime consumer
+# reads. A hardcoded target would silently overwrite the search template as soon
+# as a second query joined the allow-list.
+
+
+def test_promotion_uses_the_mapped_filename(tmp_path: Path, monkeypatch) -> None:
+    sniff = _sniff()
+    monkeypatch.setattr(sniff, "PACKAGE_TEMPLATES", tmp_path)
+    monkeypatch.setattr(
+        sniff,
+        "PROMOTED_TEMPLATES",
+        {"SearchCometResultsPaginatedResultsQuery": "search_results.json", "Other": "other.json"},
+    )
+
+    written = sniff._save_template("Other", {"args": {}, "count": 1})
+
+    assert written == tmp_path / "other.json"
+    assert json.loads(written.read_text(encoding="utf-8"))["args"]["text"] == "{query}"
+    assert not (tmp_path / "search_results.json").exists()
+
+
+def test_unpromoted_capture_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    sniff = _sniff()
+    monkeypatch.setattr(sniff, "PACKAGE_TEMPLATES", tmp_path)
+
+    assert sniff._save_template("SomeOtherQuery", {"args": {}}) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_relay_unknown_document_is_reported_as_rotated_doc_id() -> None:
+    """A valid-looking but unknown id returns a Relay error, not the legacy one."""
+    from facebook_mcp.core.exceptions import ParseError
+
+    payload = {
+        "errors": [
+            {
+                "message": "The GraphQL document with ID 1 was not found.",
+                "severity": "CRITICAL",
+            }
+        ]
+    }
+    client = _client_with(json.dumps(payload))
+    with pytest.raises(ParseError, match="probably rotated"):
+        client._raise_for_graphql_errors(payload, "search")
