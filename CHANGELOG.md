@@ -45,6 +45,13 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   `Network.getCookies` response, so a switch made in the browser is seen too —
   and fails immediately with the real reason.
   Existing threads and the thread-list fallback are unaffected.
+- `tools/smoke_mcp.py` closed stdin immediately after writing the handshake
+  (`subprocess.run(input=...)`). The SDK cancels in-flight handlers when the read
+  stream ends, so `tools/list` — which has to build one JSON schema per tool —
+  was dropped on slower machines and CI failed with `no tools/list reply` while
+  `initialize` had answered. The client now keeps the session open until the
+  replies arrive (as a real MCP client does) and prints the server's stderr on
+  every failure, not just when `initialize` goes missing.
 
 ### Planned
 
