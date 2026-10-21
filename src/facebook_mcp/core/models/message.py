@@ -5,13 +5,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class Recipient(BaseModel):
-    """A message recipient."""
-
-    uid: str = Field(..., description="Numeric Facebook id of the recipient")
-    name: str | None = Field(None, description="Display name")
-
-
 class SendResult(BaseModel):
     """Result of the ``send_message`` tool."""
 

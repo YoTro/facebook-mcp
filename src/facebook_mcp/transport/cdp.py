@@ -30,7 +30,6 @@ from ..core.exceptions import (
     NotFoundError,
     RateLimitError,
     TransportError,
-    UnsupportedError,
 )
 from ..core.logger import get_logger
 from .base import HttpRequest, HttpResponse, Transport
@@ -372,8 +371,3 @@ def _raise_for_status(resp: HttpResponse) -> None:
         raise HttpStatusError(
             f"HTTP {resp.status_code} for {resp.url}", status_code=resp.status_code
         )
-
-
-def ensure_supported() -> None:
-    """Guard for transports that must not be used for a given operation."""
-    raise UnsupportedError("use CdpTransport for this operation")
