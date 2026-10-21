@@ -145,7 +145,7 @@ facebook-mcp/
 │   │   └── factory.py               #   get_transport() + HybridTransport
 │   │
 │   ├── session/                     # L2 会话层
-│   │   ├── state.py                 #   SessionState(cookies + fb_dtsg + lsd)
+│   │   ├── state.py                 #   SessionState(cookies + tokens + Page 身份探测)
 │   │   ├── extractor.py             #   cookie 字符串 / Netscape 文件 / 页面 token 解析
 │   │   └── manager.py               #   SessionManager:装载/require_auth/轮换/浏览器引导
 │   │
@@ -171,7 +171,7 @@ facebook-mcp/
 │
 ├── tools/                           # 逆向/运维辅助脚本(不参与运行时)
 │   ├── probe.py                     # 单服务探测/人工验证
-│   ├── sniff.py                     # CDP 抓包 → doc_id / variables 模板(--save-templates)
+│   ├── sniff.py                     # CDP 抓包 → doc_id / variables;--save-templates 写 doc_ids 到账户库
 │   ├── export_cookies.py            # CDP → 浏览器 cookie → Netscape 文件
 │   ├── import_cookies.py            # 直接解密本地 Chrome profile 的 Cookies
 │   ├── check_layers.py              # 校验分层依赖与循环引用
@@ -179,7 +179,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 177 项测试(全部离线)
+└── tests/                           # 194 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -189,7 +189,8 @@ facebook-mcp/
     ├── test_m3_search.py            # variables 模板、结果解析、jazoest
     ├── test_m4_cdp.py               # CDP 协议、hybrid 分流、cookie 引导
     ├── test_m4_cdp_integration.py   # 真实 mock DevTools 服务器(HTTP + WebSocket)
-    ├── test_m5_message.py           # 发送流程、回退链、收件人解析
+    ├── test_m5_message.py           # 发送流程、回退链、收件人解析、Page 身份拦截
+    ├── test_route_doc_ids.py        # doc_id 覆盖:account.json → 注册表默认值
     ├── test_logged_out_matrix.py    # 无痕(零 cookie)基线结论的回归测试
     └── test_commit_msg.py           # 提交信息规范校验器自身
 ```
@@ -220,6 +221,7 @@ facebook-mcp/
   | `cdp_page_url` | `FB_CDP_PAGE_URL` | `https://www.facebook.com/` |
   | `cdp_timeout` | `FB_CDP_TIMEOUT` | `60.0` |
   | `cdp_cookie_bootstrap` | `FB_CDP_COOKIE_BOOTSTRAP` | `true` |
+  | `route_doc_ids` | `FB_ROUTE_DOC_IDS` | `{}`(通常由 `account.json` 的 `doc_ids` 注入,§5.4) |
 
 - `exceptions.py` —— 异常体系(§7)。
 - `accounts.py` —— 凭据存储布局(§5.8):`AccountPaths`、名称校验、0600/0700 权限、账户列表。
@@ -282,7 +284,8 @@ class Transport(Protocol):
 ### 5.3 L2 session
 
 - `state.py` —— `SessionState`:`cookies` 字典 + `fb_dtsg` + `lsd` + `user_agent`;
-  提供 `is_authenticated`(需 `c_user` + `xs`)、`cookie_header()`、`as_headers()`、`merge_tokens()`。
+  提供 `is_authenticated`(需 `c_user` + `xs`)、`cookie_header()`、`as_headers()`、`merge_tokens()`,
+  以及身份探测 `impersonator_id` / `acting_as_page`(`i_user` 存在 ⇒ 当前是 Page 身份,§5.5)。
 - `extractor.py` —— `from_cookie_string()`(Netscape 头字符串)、`from_cookie_file()`
   (Netscape `cookies.txt`)、`tokens_from_html()`(`DTSGInitialData` / `LSD`)、`user_id_from_html()`。
 - `manager.py` —— `SessionManager`:
@@ -422,6 +425,7 @@ class Transport(Protocol):
 |---|---|
 | `c_user` / `authenticated` / `updated_at` | 导出时写入的元数据,用于 `--list` 诊断 |
 | `cdp_url` | 该账号绑定**自己的** Chrome 实例(独立 profile + 端口) |
+| `doc_ids` | `{"<route.op>": "<doc_id>"}`:刷新随 build 轮换的 GraphQL `doc_id`,无需改源码(§5.4) |
 | `cdp_page_url` / `user_agent` / `impersonate` | 同上,覆盖全局设置 |
 
 **哪些操作真的需要 cookie**
@@ -540,6 +544,8 @@ server.send_message(recipient="exampleuser", text="...")
       → cdp_from(transport)                                # 必须是浏览器通道
       → navigate  https://www.facebook.com/messages/t/<uid>/
       → 等 composer;失败则点击会话列表中的该会话
+      → 仍失败:Page 身份直接报错(Page 无法主动发起会话,§5.5)
+      → 否则打开主页点 "Message"
       → Input.insertText → 校验输入框已接收
       → 点 "Press enter to send"(回退:Enter 键)
       → 轮询输入框是否清空
@@ -562,7 +568,7 @@ FacebookError                    core/exceptions.py —— 所有项目异常的
 │   ├── HttpStatusError          非 2xx(4xx/5xx,不含 404/403/401/429)
 │   ├── ParseError               响应结构变化、GraphQL errors、模板过期
 │   └── CdpError                 transport/cdp.py —— DevTools 协议调用失败
-└── UnsupportedError             该传输不具备此能力(如无浏览器时发消息)
+└── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
 
 TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/类别不支持
 ```
@@ -576,6 +582,7 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | HTTP | `429` | `RateLimitError` |
 | HTTP | 其他 `>= 400` | `HttpStatusError` |
 | Relay `errors` | 含 `missing_required_variable` | `ParseError`(提示重新抓模板) |
+| Relay `errors` | **未登录**时的 `rate limit`(code `1675004`) | `AuthError` |
 | Relay `errors` | 含 `log in` / `login` / `permission` / `checkpoint` 等 | `AuthError` |
 | Relay `errors` | 其他 | `ParseError` |
 
@@ -717,7 +724,8 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
 ### 9.2 routes 与 clients 分离
 
 接口定义(`doc_id`、端点、`variables` 模板)是**数据**,随 Facebook 改版频繁变化;
-client 是**逻辑**。改版只改 `routes/`,业务代码不动。见 §8.6。
+client 是**逻辑**。改版只改 `routes/`,业务代码不动。§5.4 的 `account.json → doc_ids`
+覆盖层更进一步:仅 `doc_id` 轮换时连 `routes/` 都不用改。见 §8.6。
 
 ### 9.3 协议优先的传输选择
 
@@ -752,7 +760,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(177 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(194 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -797,7 +805,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:177 项,覆盖 10 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:194 项,覆盖 11 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
@@ -811,8 +819,9 @@ MCP 层只做转发,不含业务逻辑。
 
 - **风控**:Facebook 对批量搜索/私信有严格频率限制与行为检测;
   需限速(`min_request_interval`)、避免高频新账号操作。
-- **改版**:`doc_id`、`variables` 模板、HTML 结构都会变化;
-  通过 `tools/sniff.py` + `routes/` 快速迭代(§8.6)。
+- **改版**:`doc_id`、`variables` 模板、HTML 结构都会变化。`doc_id` 已被
+  `account.json` 覆盖层吸收(仅它轮换时不动源码),其余通过 `tools/sniff.py`
+  + `routes/` 快速迭代(§8.6)。
 - **发送路径脆弱性**:`send_message` 依赖 Messenger DOM(`contenteditable`、
   `aria-label="Press enter to send"`)。布局变化会导致 `ParseError`,需要更新选择器。
 - **合规**:仅用于授权账号;发送营销消息需遵守 Facebook 平台政策与

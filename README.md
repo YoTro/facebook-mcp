@@ -140,7 +140,9 @@ send_message(recipient="exampleuser", text="hi", account="work")
 
 > Each account can bind its own browser via `cdp_url` in its `account.json`
 > (e.g. `{"cdp_url": "http://127.0.0.1:9223"}`), so two accounts never fight
-> over the same Chrome tab.
+> over the same Chrome tab. The same file holds that account's live GraphQL
+> `doc_id`s under `"doc_ids"`, so a Facebook build change is picked up per
+> account without editing the repository.
 
 ## Maintenance: Facebook ships a new frontend build
 
@@ -163,7 +165,7 @@ bootstrap default used before the first capture.
 | Script | Purpose |
 |---|---|
 | `tools/probe.py` | Ad-hoc live check of a service |
-| `tools/sniff.py` | Capture GraphQL `doc_id` / `variables` templates |
+| `tools/sniff.py` | Capture GraphQL `doc_id` / `variables`; `--save-templates` records them in the account store |
 | `tools/export_cookies.py` | Export Chrome cookies into `~/.facebook-mcp/accounts/<name>/` |
 | `tools/import_cookies.py` | Decrypt cookies straight from the Chrome profile |
 | `tools/launch_chrome_debug.sh` | Launch Chrome with DevTools + dedicated profile |
@@ -183,7 +185,7 @@ make check       # everything CI runs: lint, format, layers, tests, MCP smoke
 | `make fmt` | `ruff format` (rewrites) |
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
-| `make test` | `pytest -q` (146 tests, fully offline) |
+| `make test` | `pytest -q` (194 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

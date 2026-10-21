@@ -28,6 +28,12 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   accumulating dead templates (and their captured ids) inside the wheel.
 - Template promotion is atomic, so an interrupted capture can no longer leave a
   truncated `search_results.json` behind.
+- Documentation audited line by line against the code: `Settings` and
+  `account.json` tables gained `route_doc_ids` / `doc_ids`, `SessionState`
+  documents the actor probe, the exception tree reflects the widened
+  `UnsupportedError`, and the stale test counts (146 / 177) and the CN/EN
+  divergences in §6.3 and §7 were corrected. `.env.example` no longer repeats the
+  CDP block and documents `FB_ROUTE_DOC_IDS`.
 
 ### Fixed
 

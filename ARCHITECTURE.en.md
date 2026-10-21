@@ -161,7 +161,7 @@ facebook-mcp/
 │   │   └── factory.py               #   get_transport() + HybridTransport
 │   │
 │   ├── session/                     # L2 session layer
-│   │   ├── state.py                 #   SessionState (cookies + fb_dtsg + lsd)
+│   │   ├── state.py                 #   SessionState (cookies + tokens + Page actor probe)
 │   │   ├── extractor.py             #   cookie string / Netscape file / page tokens
 │   │   └── manager.py               #   SessionManager: load / require_auth / rotate / bootstrap
 │   │
@@ -187,7 +187,7 @@ facebook-mcp/
 │
 ├── tools/                           # reverse-engineering / ops helpers (not runtime)
 │   ├── probe.py                     # single-service probe for manual verification
-│   ├── sniff.py                     # CDP capture → doc_id / variables (--save-templates)
+│   ├── sniff.py                     # CDP capture → doc_id / variables; --save-templates writes doc_ids to the account store
 │   ├── export_cookies.py            # CDP → browser cookies → Netscape file
 │   ├── import_cookies.py            # decrypt a local Chrome profile's Cookies
 │   ├── check_layers.py              # verify the layering + detect import cycles
@@ -195,7 +195,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 177 tests (all offline)
+└── tests/                           # 194 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -205,7 +205,8 @@ facebook-mcp/
     ├── test_m3_search.py            # variables template, result parsing, jazoest
     ├── test_m4_cdp.py               # CDP protocol, hybrid routing, cookie bootstrap
     ├── test_m4_cdp_integration.py   # real mock DevTools server (HTTP + WebSocket)
-    ├── test_m5_message.py           # send flow, fallback chain, recipient resolution
+    ├── test_m5_message.py           # send flow, fallback chain, recipient resolution, Page refusal
+    ├── test_route_doc_ids.py        # doc_id overrides: account.json → registry default
     ├── test_logged_out_matrix.py    # regression tests for the incognito baseline
     └── test_commit_msg.py           # the commit-message validator itself
 ```
@@ -236,6 +237,7 @@ facebook-mcp/
   | `cdp_page_url` | `FB_CDP_PAGE_URL` | `https://www.facebook.com/` |
   | `cdp_timeout` | `FB_CDP_TIMEOUT` | `60.0` |
   | `cdp_cookie_bootstrap` | `FB_CDP_COOKIE_BOOTSTRAP` | `true` |
+  | `route_doc_ids` | `FB_ROUTE_DOC_IDS` | `{}` (normally injected from `doc_ids` in `account.json`, §5.4) |
 
 - `exceptions.py` — exception hierarchy (§7).
 - `accounts.py` — credential layout (§5.8): `AccountPaths`, name validation,
@@ -308,7 +310,9 @@ class Transport(Protocol):
 
 - `state.py` — `SessionState`: a `cookies` dict plus `fb_dtsg`, `lsd` and
   `user_agent`; exposes `is_authenticated` (requires `c_user` + `xs`),
-  `cookie_header()`, `as_headers()`, `merge_tokens()`.
+  `cookie_header()`, `as_headers()`, `merge_tokens()`, and the actor probe
+  `impersonator_id` / `acting_as_page` (an `i_user` cookie means the session is
+  switched into a Page, §5.5).
 - `extractor.py` — `from_cookie_string()` (Netscape header string),
   `from_cookie_file()` (Netscape `cookies.txt`), `tokens_from_html()`
   (`DTSGInitialData` / `LSD`), `user_id_from_html()`.
@@ -476,6 +480,7 @@ With no source at all the server runs anonymously (public pages only).
 |---|---|
 | `c_user` / `authenticated` / `updated_at` | metadata written on export, used by `--list` |
 | `cdp_url` | binds this account to **its own** Chrome instance (separate profile + port) |
+| `doc_ids` | `{"<route.op>": "<doc_id>"}`: refreshes the rotating GraphQL `doc_id` without a source change (§5.4) |
 | `cdp_page_url` / `user_agent` / `impersonate` | same, overriding the global settings |
 
 **Which operations really need cookies**
@@ -600,6 +605,7 @@ server.send_message(recipient="exampleuser", text="...")
       → cdp_from(transport)                                # must be a browser transport
       → navigate  https://www.facebook.com/messages/t/<uid>/
       → wait for the composer; otherwise click the thread-list row
+      → otherwise abort when the session acts as a Page (it cannot start a chat, §5.5)
       → otherwise open the profile and click "Message"
       → Input.insertText → verify the composer received it
       → click "Press enter to send" (fallback: Enter key)
@@ -624,8 +630,9 @@ FacebookError                    core/exceptions.py — base class for every err
 │   ├── HttpStatusError          non-2xx (4xx/5xx, excluding 404/403/401/429)
 │   ├── ParseError               response shape changed, GraphQL errors, stale template
 │   └── CdpError                 transport/cdp.py — a DevTools protocol call failed
-└── UnsupportedError             this transport cannot perform the operation
-                                 (e.g. sending a message without a browser)
+└── UnsupportedError             this **transport or account type** cannot perform
+                                 the operation (messaging without a browser,
+                                 starting a chat as a Page)
 
 TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt template
                                   or unsupported category
@@ -798,7 +805,9 @@ no idea how a request physically travels.
 
 Interface definitions (`doc_id`, endpoints, `variables` templates) are **data**
 that changes with every Facebook release; clients are **logic**. A release only
-touches `routes/`. See §8.6.
+touches `routes/`. The `account.json -> doc_ids` override in §5.4 goes one step
+further: when only the `doc_id` rotates, not even `routes/` has to change. See
+§8.6.
 
 ### 9.3 Protocol-first transport selection
 
@@ -833,7 +842,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (177), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (194), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -881,7 +890,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 177 across 10 files (including a CDP integration test against a mock DevTools server)
+- Tests: 194 across 11 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
@@ -897,7 +906,9 @@ layer only forwards, it contains no business logic.
   detection on bulk search/messaging. Throttle (`min_request_interval`) and avoid
   hammering from brand-new accounts.
 - **Frontend churn**: `doc_id`, `variables` templates and HTML structure all
-  change; iterate through `tools/sniff.py` + `routes/` (§8.6).
+  change. `doc_id` rotation is absorbed by the `account.json` override layer (no
+  source change when only it moves); everything else iterates through
+  `tools/sniff.py` + `routes/` (§8.6).
 - **Fragile send path**: `send_message` depends on Messenger's DOM
   (`contenteditable`, `aria-label="Press enter to send"`). Layout changes cause a
   `ParseError` and require updating the selectors.
