@@ -341,8 +341,14 @@ layer (`base.py` only defines dataclasses).
   |---|---|---|---|
   | `PROFILE_HEADER` | `28585259111117102` | `ProfileCometHeaderQuery` | captured, unused |
   | `PROFILE_TIMELINE_REFETCH` | – | `ProfileCometTimelineFeedRefetchQuery` | not captured (not needed) |
-  | `SEARCH_RESULTS` | `28778193718476003` | `SearchCometResultsPaginatedResultsQuery` | ✅ in use |
+  | `SEARCH_RESULTS` | `39411546341825607` | `SearchCometResultsPaginatedResultsQuery` | ✅ in use |
   | `SEND_MESSAGE` | – | `SendMessageMutation` | does not exist at page level (see §10 M5) |
+
+- The `doc_id` values above are only **bootstrap defaults**:
+  `BaseClient._doc_id()` prefers the `doc_ids` map in `account.json`
+  (`{"search.results": "..."}`). `doc_id` rotates with every frontend build and
+  can differ per account, so the live value lives in the credential store —
+  refreshing it needs no source change and produces no commit.
 
 - `templates/` — the search `variables` template. It has 42 fields (27 of them
   Relay feature gates) and is managed **as data**; `build_search_variables()`
@@ -566,7 +572,7 @@ server.search_pages("pest control")
       → BaseClient._graphql(SEARCH_RESULTS, variables)
           → SessionManager.require_auth()                  # bootstraps from the browser if needed
           → _ensure_dtsg()                                 # fetches the home page when fb_dtsg is missing
-          → POST /api/graphql/  doc_id=28778193718476003
+          → POST /api/graphql/  doc_id=39411546341825607
                fb_dtsg / lsd / jazoest / variables
       → _parse_results(payload) → list[SearchResult]
       → payload contains errors → ParseError / AuthError (see §7)
@@ -690,7 +696,7 @@ When logged out, `DTSGInitialData` is `{}` (empty) while `lsd` still has a value
 **Search result structure** (GraphQL, measured):
 
 ```
-POST /api/graphql/  doc_id=28778193718476003
+POST /api/graphql/  doc_id=39411546341825607
      fb_api_req_friendly_name=SearchCometResultsPaginatedResultsQuery
   → data.serpResponse.results.edges[*].rendering_strategy
         .view_model.profile.{id, name, url, is_verified, profile_picture.uri}
@@ -752,9 +758,15 @@ through CDP**.
        --seconds 20 --save-templates
    ```
 
-3. `--save-templates` rewrites `routes/templates/search_results.json` directly.
-4. If the `doc_id` changed, update `routes/graphql.py` (the scan prints a
-   ready-to-paste `Route(...)`).
+3. `--save-templates` records the captured `doc_id`s in
+   `~/.facebook-mcp/accounts/<account>/account.json` under `doc_ids`, and
+   rewrites `routes/templates/search_results.json` (only for queries on the
+   `PROMOTED_TEMPLATES` allow-list); everything else stays in the gitignored
+   `.cache/routes.json`, so dead templates (and the session ids inside them)
+   never ship in the wheel.
+4. That is normally the whole job — `routes/graphql.py` needs no edit. Only bump
+   the `Route(...)` default when you want fresh installs to work before their
+   first capture.
 5. Only `routes/` changes — client and service logic stay untouched.
 
 ---
@@ -827,7 +839,7 @@ layer only forwards, it contains no business logic.
 
 ### M3 details
 
-- `routes/graphql.py`: `SEARCH_RESULTS` (`doc_id=28778193718476003`)
+- `routes/graphql.py`: `SEARCH_RESULTS` (`doc_id=39411546341825607`)
 - `routes/templates/search_results.json`: captured `variables` template
 - `routes/templates/__init__.py`: `build_search_variables()`
 - `clients/search_client.py`, `services/search_service.py`

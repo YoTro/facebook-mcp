@@ -12,17 +12,26 @@ normally in the browser. For each captured request it extracts:
 
 and prints a ready-to-paste Python route table for ``routes/graphql.py``.
 
+Captured ``variables`` blobs contain session-derived identifiers, so they are
+written to the gitignored ``--out`` path (``.cache/routes.json``). With
+``--save-templates`` the capture is additionally made live: the search
+``variables`` template is promoted into ``src/facebook_mcp/routes/templates/``
+(runtime reads it) and fresh ``doc_id`` values are recorded in the account
+store, so refreshing them after a Facebook build needs no source change.
+
 Usage::
 
     .venv/bin/python tools/sniff.py                 # capture for 60s
     .venv/bin/python tools/sniff.py --seconds 120
     .venv/bin/python tools/sniff.py --url-contains send_message
+    .venv/bin/python tools/sniff.py --save-templates
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -30,8 +39,18 @@ from urllib.parse import parse_qs, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from facebook_mcp.core.config import get_settings
+from facebook_mcp.core.config import Settings, get_settings
+from facebook_mcp.routes.graphql import ALL as GRAPHQL_ROUTES
 from facebook_mcp.transport.cdp import CdpTransport
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_TEMPLATES = REPO_ROOT / "src/facebook_mcp/routes/templates"
+
+# Only captured queries with a consumer in ``routes/templates/__init__.py`` are
+# promoted into the package. Everything else is already recorded in ``--out``;
+# copying it into ``routes/templates/`` would ship dead captures — including
+# session-derived ids — inside the wheel.
+PROMOTED_TEMPLATES = frozenset({"SearchCometResultsPaginatedResultsQuery"})
 
 
 def _form_fields(post_data: str | None) -> dict[str, str]:
@@ -55,9 +74,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--save-templates",
         action="store_true",
-        help="also write captured GraphQL variables into routes/templates/",
+        help=(
+            "make this capture live: promote the search variables template and "
+            "record fresh doc_ids in the account store (no source change)"
+        ),
     )
     args = parser.parse_args(argv)
+
+    if args.save_templates and not (REPO_ROOT / ".git").exists():
+        print(
+            "--save-templates only works from a source checkout: "
+            f"{PACKAGE_TEMPLATES} is inside an installed package here.\n"
+            "Capture with --out instead and promote the template by hand.",
+            file=sys.stderr,
+        )
+        return 2
 
     settings = get_settings()
     transport = CdpTransport(settings)
@@ -128,7 +159,9 @@ def main(argv: list[str] | None = None) -> int:
         captured[key] = entry
 
         if args.save_templates and entry["variables"] is not None:
-            _save_template(str(friendly or "unknown"), entry["variables"])
+            saved = _save_template(str(friendly or "unknown"), entry["variables"])
+            if saved is not None:
+                print(f"    template  -> {_short(saved)}")
 
         print(f"+ {friendly or '?'}")
         print(f"    doc_id    : {doc_id}")
@@ -137,10 +170,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\ncaptured {len(captured)} unique route(s)")
     if captured:
         out = Path(args.out)
-        out.parent.mkdir(parents=True, exist_ok=True)
+        out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         out.write_text(json.dumps(list(captured.values()), indent=2), encoding="utf-8")
+        # Captured ``variables`` carry session-derived ids; keep them private.
+        out.chmod(0o600)
         print(f"written to {out}\n")
         _print_route_table(captured)
+        if args.save_templates:
+            meta = _record_doc_ids(settings, captured)
+            if meta is not None:
+                print(f"doc_ids   -> {_short(meta)}  (no source change needed)\n")
 
     transport.close()
     return 0
@@ -155,28 +194,73 @@ def _try_json(value: str | None) -> object:
         return value[:300]
 
 
-def _save_template(friendly_name: str, variables: object) -> None:
-    """Persist captured variables where the clients expect them."""
-    templates = Path(__file__).resolve().parents[1] / "src/facebook_mcp/routes/templates"
-    templates.mkdir(parents=True, exist_ok=True)
+def _save_template(friendly_name: str, variables: object) -> Path | None:
+    """Promote a captured query into a template the runtime actually reads.
 
-    if friendly_name == "SearchCometResultsPaginatedResultsQuery":
-        target = templates / "search_results.json"
-        payload = json.loads(json.dumps(variables))
-        payload["args"]["text"] = "{query}"
-        payload["args"]["experience"]["type"] = "{experience_type}"
-        payload["args"]["context"]["bsid"] = "{bsid}"
-        payload["cursor"] = '{"page_number":{page_number},"flow_cursors_serialized":{}}'
-        target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        print(
-            f"    template  -> {target.relative_to(Path.cwd()) if target.is_relative_to(Path.cwd()) else target}"
-        )
-        return
+    Returns the written path, or ``None`` when the capture is not promoted.
+    """
+    if friendly_name not in PROMOTED_TEMPLATES:
+        return None
 
-    safe = _const_name(friendly_name).lower()
-    target = templates / f"{safe}.json"
-    target.write_text(json.dumps(variables, indent=2, sort_keys=True), encoding="utf-8")
-    print(f"    template  -> {target.name}")
+    target = PACKAGE_TEMPLATES / "search_results.json"
+    payload = json.loads(json.dumps(variables))
+    args = payload.setdefault("args", {})
+    args["text"] = "{query}"
+    args.setdefault("experience", {})["type"] = "{experience_type}"
+    args.setdefault("context", {})["bsid"] = "{bsid}"
+    payload["cursor"] = '{"page_number":{page_number},"flow_cursors_serialized":{}}'
+    _write_atomic(target, json.dumps(payload, indent=2, sort_keys=True))
+    return target
+
+
+def _record_doc_ids(settings: Settings, captured: dict[str, dict[str, object]]) -> Path | None:
+    """Persist freshly captured ``doc_id`` values into the account store.
+
+    ``routes/graphql.py`` only carries a bootstrap default; the live value is
+    read from ``account.json`` at request time (``BaseClient._doc_id``), because
+    ``doc_id`` rotates with every frontend build. Returns the metadata file it
+    touched, or ``None`` when nothing captured maps onto a known route.
+    """
+    ops = {r.friendly_name: r.op for r in GRAPHQL_ROUTES if r.friendly_name}
+    fresh: dict[str, str] = {}
+    for entry in captured.values():
+        op = ops.get(str(entry.get("friendly_name") or ""))
+        doc_id = entry.get("doc_id")
+        if op and doc_id:
+            fresh[op] = str(doc_id)
+    if not fresh:
+        return None
+
+    paths = settings.account_paths()
+    existing = paths.load_meta().get("doc_ids")
+    merged = {**(existing if isinstance(existing, dict) else {}), **fresh}
+    paths.merge_meta(doc_ids=merged)
+    return paths.meta_file
+
+
+def _short(path: Path) -> str:
+    """Render ``path`` relative to ``~`` or the repo root when possible."""
+    for base, prefix in ((Path.home(), "~/"), (REPO_ROOT, "")):
+        try:
+            return prefix + str(path.relative_to(base))
+        except ValueError:
+            continue
+    return str(path)
+
+
+def _write_atomic(target: Path, text: str) -> None:
+    """Replace ``target`` atomically so a failed capture cannot truncate it.
+
+    ``search_results.json`` is loaded on every search; a half-written file
+    would surface as ``TemplateError`` until the next successful capture.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _print_route_table(captured: dict[str, dict[str, object]]) -> None:

@@ -151,6 +151,13 @@ GraphQL `doc_id`s and `variables` templates change. Re-capture them:
                                --seconds 20 --save-templates
 ```
 
+`--save-templates` records the fresh `doc_id`s in
+`~/.facebook-mcp/accounts/<name>/account.json` (read at request time by
+`BaseClient._doc_id()`) and promotes the search `variables` template into the
+package when its shape changed. A new Facebook build therefore needs **no
+source change and no commit** — the `doc_id` in `routes/graphql.py` is only the
+bootstrap default used before the first capture.
+
 ## Helpers
 
 | Script | Purpose |

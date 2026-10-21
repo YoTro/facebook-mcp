@@ -15,6 +15,19 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   keeping the same section numbering as the Chinese original.
 - `CONTRIBUTING.md` and `CHANGELOG.md` now document the documentation-sync and
   documentation-privacy rules.
+- GraphQL `doc_id` overrides: the registry in `routes/graphql.py` is now only a
+  bootstrap default, and `BaseClient._doc_id()` prefers the `doc_ids` map in
+  `~/.facebook-mcp/accounts/<name>/account.json`. `doc_id` rotates with every
+  Facebook frontend build, so refreshing it no longer needs a source change.
+
+### Changed
+
+- `tools/sniff.py --save-templates` now records captured `doc_id`s in the
+  account store and only promotes the search `variables` template into the
+  package; other captures stay in the gitignored `.cache/routes.json` instead of
+  accumulating dead templates (and their captured ids) inside the wheel.
+- Template promotion is atomic, so an interrupted capture can no longer leave a
+  truncated `search_results.json` behind.
 
 ### Planned
 

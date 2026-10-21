@@ -309,8 +309,13 @@ class Transport(Protocol):
   |---|---|---|---|
   | `PROFILE_HEADER` | `28585259111117102` | `ProfileCometHeaderQuery` | 已捕获,未使用 |
   | `PROFILE_TIMELINE_REFETCH` | – | `ProfileCometTimelineFeedRefetchQuery` | 未捕获(不需要) |
-  | `SEARCH_RESULTS` | `28778193718476003` | `SearchCometResultsPaginatedResultsQuery` | ✅ 使用中 |
+  | `SEARCH_RESULTS` | `39411546341825607` | `SearchCometResultsPaginatedResultsQuery` | ✅ 使用中 |
   | `SEND_MESSAGE` | – | `SendMessageMutation` | 不存在于页面级(见 §10 M5) |
+
+- 表里的 `doc_id` 只是 **bootstrap 默认值**:`BaseClient._doc_id()` 优先读
+  `account.json` 的 `doc_ids`(`{"search.results": "..."}`)。`doc_id` 随每次
+  前端 build 轮换、且可能因账号而异,所以运行时值放在凭证存储里,
+  刷新它不改源码、也不产生提交。
 
 - `templates/` —— 搜索 `variables` 模板。包含 42 个字段(其中 27 个 Relay feature-gate),
   作为**数据**管理;`build_search_variables()` 只替换
@@ -511,7 +516,7 @@ server.search_pages("pest control")
       → BaseClient._graphql(SEARCH_RESULTS, variables)
           → SessionManager.require_auth()                  # 无 cookie 时先从浏览器引导
           → _ensure_dtsg()                                 # 缺 fb_dtsg 时拉首页补齐
-          → POST /api/graphql/  doc_id=28778193718476003
+          → POST /api/graphql/  doc_id=39411546341825607
                fb_dtsg / lsd / jazoest / variables
       → _parse_results(payload) → list[SearchResult]
       → payload 含 errors → ParseError / AuthError(见 §7)
@@ -624,7 +629,7 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 **搜索结果结构**(GraphQL,已实测):
 
 ```
-POST /api/graphql/  doc_id=28778193718476003
+POST /api/graphql/  doc_id=39411546341825607
      fb_api_req_friendly_name=SearchCometResultsPaginatedResultsQuery
   → data.serpResponse.results.edges[*].rendering_strategy
         .view_model.profile.{id, name, url, is_verified, profile_picture.uri}
@@ -681,8 +686,13 @@ jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))   # 实测 25724 == 25724
        --seconds 20 --save-templates
    ```
 
-3. `--save-templates` 会直接重写 `routes/templates/search_results.json`。
-4. `doc_id` 变则更新 `routes/graphql.py`(扫描输出已打印可粘贴的 `Route(...)`)。
+3. `--save-templates` 会把抓到的 `doc_id` 写进
+   `~/.facebook-mcp/accounts/<account>/account.json` 的 `doc_ids`,
+   并(仅限 `PROMOTED_TEMPLATES` 白名单)重写
+   `routes/templates/search_results.json`;其余抓包结果只留在 gitignored 的
+   `.cache/routes.json`,避免死模板(及其中的会话 id)进 wheel。
+4. 正常情况下到此为止 —— 不需要改 `routes/graphql.py`。只有想把“新装即用”的
+   bootstrap 默认值推上去时,才把抓到的 `doc_id` 提交进 `Route(...)`。
 5. 仅动 `routes/`,不改 client / service 逻辑。
 
 ---
@@ -752,7 +762,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M3 交付明细
 
-- `routes/graphql.py`:`SEARCH_RESULTS`(`doc_id=28778193718476003`)
+- `routes/graphql.py`:`SEARCH_RESULTS`(`doc_id=39411546341825607`)
 - `routes/templates/search_results.json`:抓包得到的 `variables` 模板
 - `routes/templates/__init__.py`:`build_search_variables()`
 - `clients/search_client.py`、`services/search_service.py`

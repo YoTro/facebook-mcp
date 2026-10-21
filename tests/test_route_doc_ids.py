@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from facebook_mcp.clients.base import BaseClient
@@ -53,6 +54,18 @@ def _session(settings: Settings) -> SessionManager:
     session.state.fb_dtsg = "DTSGTOKEN"
     session.state.lsd = "LSDTOKEN"
     return session
+
+
+def _sniff():
+    """Import ``tools/sniff.py`` (its CDP import pulls in ``websocket``)."""
+    import sys
+
+    tools = str(Path(__file__).resolve().parents[1] / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import sniff
+
+    return sniff
 
 
 # --- resolution order ----------------------------------------------------
@@ -118,3 +131,40 @@ def test_override_reaches_the_graphql_form() -> None:
     assert transport.requests[0].data["fb_api_req_friendly_name"] == (
         graphql.SEARCH_RESULTS.friendly_name
     )
+
+
+# --- capture -> account store -------------------------------------------
+
+
+def test_capture_records_known_routes_only() -> None:
+    sniff = _sniff()
+    captured = {
+        "a": {"friendly_name": "SearchCometResultsPaginatedResultsQuery", "doc_id": "111"},
+        "b": {"friendly_name": "SomeUnrelatedQuery", "doc_id": "222"},
+        "c": {"friendly_name": None, "doc_id": "333"},
+    }
+
+    meta = sniff._record_doc_ids(Settings(), captured)
+
+    assert meta == AccountPaths.for_account("default").meta_file
+    assert json.loads(meta.read_text(encoding="utf-8"))["doc_ids"] == {"search.results": "111"}
+
+
+def test_capture_merges_with_previous_doc_ids() -> None:
+    sniff = _sniff()
+    AccountPaths.for_account("default").merge_meta(doc_ids={"profile.header": "999"})
+
+    sniff._record_doc_ids(
+        Settings(),
+        {"a": {"friendly_name": "SearchCometResultsPaginatedResultsQuery", "doc_id": "444"}},
+    )
+
+    meta = json.loads(AccountPaths.for_account("default").meta_file.read_text(encoding="utf-8"))
+    assert meta["doc_ids"] == {"profile.header": "999", "search.results": "444"}
+
+
+def test_capture_without_known_routes_writes_nothing() -> None:
+    sniff = _sniff()
+    captured = {"a": {"friendly_name": "Nope", "doc_id": "1"}}
+    assert sniff._record_doc_ids(Settings(), captured) is None
+    assert not AccountPaths.for_account("default").meta_file.exists()

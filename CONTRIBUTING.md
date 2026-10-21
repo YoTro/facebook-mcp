@@ -196,7 +196,11 @@ Accepted as-is: `Merge ...`, `Revert ...`, `fixup! ...`, `squash! ...`.
 Facebook changes its frontend regularly. When a query breaks:
 
 1. Re-capture with `tools/sniff.py --navigate <url> --save-templates`.
-2. Update `routes/graphql.py` (doc_id) and/or `routes/templates/*.json`.
+2. That writes the fresh `doc_id`s into the account store and promotes
+   `routes/templates/search_results.json` when the `variables` shape changed.
+   Do **not** hardcode a rotated `doc_id` in `routes/graphql.py`: the registry
+   value is only a bootstrap default (`BaseClient._doc_id()` prefers the
+   account store), so refreshing it must not produce a commit.
 3. Keep clients and services untouched — that separation is the point.
 
 See `ARCHITECTURE.md` §8.6.
