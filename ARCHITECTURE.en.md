@@ -150,7 +150,7 @@ facebook-mcp/
 │   │       ├── profile.py           #   Profile / Timeline
 │   │       ├── post.py              #   Post / PostTimeResult
 │   │       ├── search.py            #   SearchCategory / SearchResult
-│   │       └── message.py           #   Recipient / SendResult
+│   │       └── message.py           #   SendResult
 │   │
 │   ├── transport/                   # L1 transports
 │   │   ├── base.py                  #   Transport protocol + HttpRequest/HttpResponse
@@ -195,7 +195,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 194 tests (all offline)
+└── tests/                           # 211 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -206,7 +206,8 @@ facebook-mcp/
     ├── test_m4_cdp.py               # CDP protocol, hybrid routing, cookie bootstrap
     ├── test_m4_cdp_integration.py   # real mock DevTools server (HTTP + WebSocket)
     ├── test_m5_message.py           # send flow, fallback chain, recipient resolution, Page refusal
-    ├── test_route_doc_ids.py        # doc_id overrides: account.json → registry default
+    ├── test_route_doc_ids.py        # doc_id overrides, error envelopes, template promotion
+    ├── test_smoke_mcp.py            # smoke-client pipe / EOF behaviour
     ├── test_logged_out_matrix.py    # regression tests for the incognito baseline
     └── test_commit_msg.py           # the commit-message validator itself
 ```
@@ -272,6 +273,7 @@ class HttpResponse:
     text: str
     content: bytes
     # .ok / .json() / .raise_for_status()
+    # .json() strips Facebook's `for (;;);` anti-hijacking prefix (GraphQL error envelopes carry it)
 
 class Transport(Protocol):
     name: str
@@ -334,7 +336,11 @@ class Transport(Protocol):
 This layer is **pure data plus data transformation** and depends on no other
 layer (`base.py` only defines dataclasses).
 
-- `base.py` — `Route(op, method, path, doc_id, friendly_name, requires_auth)`.
+- `base.py` — `Route(op, method, path, doc_id, friendly_name, requires_auth, anonymous)`.
+  `anonymous=True` means **no session cookies are sent**: that is the profile
+  page's situation — with cookies Facebook returns its logged-in SPA shell
+  (`userVanity` / `timeline_list_feed_units` disappear) and only the logged-out
+  variant embeds the ServerJS payload.
 - `rest.py` — page entry points: `PROFILE_PAGE` (`/{username}`) is used by
   `profile_client`; `SEARCH_PEOPLE_PAGE` / `SEARCH_PAGES_PAGE` are **records
   only** (search itself goes through GraphQL and no production code calls them);
@@ -377,7 +383,9 @@ layer (`base.py` only defines dataclasses).
   - `Timeline.payload_complete`: `False` means the page had no timeline section
     at all (Facebook's "reduced" variant); in that case "0 posts" does not mean
     the user never posted
-  - **no GraphQL**, so no `doc_id` or cookie is required
+  - **no GraphQL and no cookies**: `PROFILE_PAGE.anonymous=True` skips the
+    session headers, because the logged-in page is a client-rendered shell that
+    parses to zero posts
 - `search_client.py` — `search(query, category, limit)`:
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, …)`
   - `_parse_results()`: reads
@@ -396,9 +404,10 @@ layer (`base.py` only defines dataclasses).
   - **the third fallback is unavailable to a Page**: Facebook does not render the
     profile `Message` button for a Page actor (a Page cannot start a conversation
     with a stranger). Detection looks for an `i_user` cookie in the exported
-    snapshot (`SessionState.acting_as_page`) *and* in the live
-    `Network.getCookies` response, because an identity switch performed in the
-    browser leaves the snapshot stale — the browser wins. When the thread row
+    cookie, preferring the live `Network.getCookies` response: when it is
+    non-empty the browser is authoritative (so a stale snapshot cannot
+    misjudge), and only an empty or unreachable live jar falls back to the
+    exported snapshot (`SessionState.acting_as_page`). When the thread row
     fails there, the client raises `UnsupportedError` with the reason instead of
     polling 35s for a button that will never appear. Existing threads still work
     (levels 1-2).
@@ -650,6 +659,8 @@ TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt temp
 | Relay `errors` | `rate limit` while **not** authenticated (code `1675004`) | `AuthError` |
 | Relay `errors` | contains `log in` / `login` / `permission` / `checkpoint` / … | `AuthError` |
 | Relay `errors` | anything else | `ParseError` |
+| Body | not JSON (e.g. HTML after the `for (;;);` guard) | `ParseError` hinting the `doc_id` may have rotated |
+| Legacy envelope | `{"error": <code>, "errorSummary": ...}` (no `errors`) | `ParseError`; `1357031` (content no longer available) names the rotated `doc_id` |
 
 **How it surfaces through MCP**: `search_*` / `get_*` raise, and the SDK turns
 that into `isError`; `send_message` is caught by `MessageService` and returned as
@@ -686,6 +697,18 @@ visitor with **zero Facebook cookies**.
 > looks like "no posts" instead of an error. `_DEFAULT_HEADERS` always sends it,
 > and `Timeline.payload_complete` marks "the page had no timeline section", with
 > `PostService` suggesting a retry in the error message.
+
+**Being logged in changes the HTML variant** (same URL, same moment, 2026-10):
+
+| Request | Size | `userVanity` | `timeline_list_feed_units` | Result |
+|---|---|---|---|---|
+| anonymous | 961 KB | 2 | 4 | complete embedded ServerJS payload |
+| with `c_user`/`xs` | 1 181 KB | **0** | **0** | logged-in SPA shell; data comes from GraphQL |
+
+The profile page therefore **has to be fetched anonymously**, which is why
+`Route.anonymous` exists. An earlier implementation sent the cookies along and
+broke "latest post time" precisely for accounts that had search credentials
+configured.
 
 **Conclusion**
 
@@ -770,8 +793,11 @@ The third fallback therefore only works for personal accounts; see
 
 ### 8.6 Maintaining the integration after a Facebook release
 
-1. Find the failing tool and decide whether the `doc_id` expired
-   (`ParseError: … stale`) or the layout changed.
+1. Find the failing tool and read the `ParseError`:
+   - `doc_id ... was rejected` / `Facebook error 1357031` → **`doc_id` rotated**
+     (the common case);
+   - `...template are stale` → the `variables` template expired;
+   - `composer did not appear` and similar → DOM layout changed.
 2. Re-capture with `tools/sniff.py`:
 
    ```bash
@@ -789,7 +815,10 @@ The third fallback therefore only works for personal accounts; see
 4. That is normally the whole job — `routes/graphql.py` needs no edit. Only bump
    the `Route(...)` default when you want fresh installs to work before their
    first capture.
-5. Only `routes/` changes — client and service logic stay untouched.
+5. **Restart the MCP server** so the new `doc_ids` are picked up (§5.4).
+6. Only `routes/` changes — client and service logic stay untouched. Commit the
+   captured `doc_id` into `Route(...)` only to refresh the bootstrap default for
+   fresh clones; the route table `tools/sniff.py` prints exists for that step.
 
 ---
 
@@ -842,7 +871,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (194), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (211), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -890,7 +919,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 194 across 11 files (including a CDP integration test against a mock DevTools server)
+- Tests: 211 across 12 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

@@ -22,6 +22,9 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Changed
 
+- Docs now state that a refreshed `account.json` `doc_id` is read when the server
+  starts, so the MCP server has to be restarted; §8.6 distinguishes a rotated
+  `doc_id` (legacy envelope) from an expired `variables` template.
 - `tools/sniff.py --save-templates` now records captured `doc_id`s in the
   account store and only promotes the search `variables` template into the
   package; other captures stay in the gitignored `.cache/routes.json` instead of
@@ -37,6 +40,35 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **`get_user_latest_post_time` failed whenever cookies were configured.** The
+  profile page is served as a logged-in SPA shell when a session cookie is sent
+  (no `userVanity`, no `timeline_list_feed_units`), so the parser reported
+  "page shape changed?" for exactly the setup the docs recommend. `Route` gained
+  an `anonymous` flag and `PROFILE_PAGE` now fetches without credentials;
+  search still uses the session. Reported as a regression by an end-to-end check.
+- **A rotated `doc_id` surfaced as a raw `JSONDecodeError`.** Facebook answers an
+  unknown query id with HTTP 200 and a legacy envelope guarded by its
+  anti-JSON-hijacking prefix (`for (;;);{"error":1357031,...}`).
+  `HttpResponse.json()` now strips the guard, and `BaseClient` turns a
+  still-undecodable body or a legacy `{"error": ...}` envelope into a
+  `ParseError` that names the rejected `doc_id` and points at
+  `tools/sniff.py --save-templates`. Previously the error bypassed the exception
+  hierarchy entirely and hid the real cause.
+- `_acting_as_page()` checked the exported cookie snapshot first and returned
+  early, contradicting its own docstring: a jar exported while acting as a Page
+  kept refusing the profile fallback after the browser had been switched back to
+  the personal identity. The live `Network.getCookies` response is now
+  authoritative when non-empty; the snapshot is only a fallback.
+- `tools/smoke_mcp.py` now drains the child's stderr on a background thread. A
+  chatty or crashing server could fill the pipe buffer and block before
+  replying, which the smoke test reported as a bogus handshake timeout.
+- `tools/sniff.py` promoted any capture into `search_results.json`; the allowed
+  set is now an explicit `{friendly_name: filename}` mapping, so adding a second
+  promoted query can no longer overwrite the search template. Its route-table
+  printout no longer tells operators to hardcode a rotated `doc_id` in
+  `routes/graphql.py`, which CONTRIBUTING.md forbids.
+- Removed dead code: `transport/cdp.py::ensure_supported()` (never called) and
+  the unused `Recipient` model.
 - `send_message` against a session acting as a Page wasted ~35s polling for the
   profile "Message" button, which Facebook never renders for a Page (a Page
   cannot start a conversation with a stranger), and then blamed "the page layout

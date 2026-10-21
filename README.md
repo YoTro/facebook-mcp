@@ -154,11 +154,13 @@ GraphQL `doc_id`s and `variables` templates change. Re-capture them:
 ```
 
 `--save-templates` records the fresh `doc_id`s in
-`~/.facebook-mcp/accounts/<name>/account.json` (read at request time by
-`BaseClient._doc_id()`) and promotes the search `variables` template into the
-package when its shape changed. A new Facebook build therefore needs **no
-source change and no commit** — the `doc_id` in `routes/graphql.py` is only the
-bootstrap default used before the first capture.
+`~/.facebook-mcp/accounts/<name>/account.json` and promotes the search
+`variables` template into the package when its shape changed. A new Facebook
+build therefore needs **no source change and no commit** — the `doc_id` in
+`routes/graphql.py` is only the bootstrap default used before the first capture.
+
+> The override is read when the server starts, so **restart the MCP server** to
+> pick up a refreshed `doc_id`.
 
 ## Helpers
 
@@ -185,7 +187,7 @@ make check       # everything CI runs: lint, format, layers, tests, MCP smoke
 | `make fmt` | `ruff format` (rewrites) |
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
-| `make test` | `pytest -q` (194 tests, fully offline) |
+| `make test` | `pytest -q` (211 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

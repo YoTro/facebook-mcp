@@ -134,7 +134,7 @@ facebook-mcp/
 │   │       ├── profile.py           #   Profile / Timeline
 │   │       ├── post.py              #   Post / PostTimeResult
 │   │       ├── search.py            #   SearchCategory / SearchResult
-│   │       └── message.py           #   Recipient / SendResult
+│   │       └── message.py           #   SendResult
 │   │
 │   ├── transport/                   # L1 传输层
 │   │   ├── base.py                  #   Transport 协议 + HttpRequest/HttpResponse
@@ -179,7 +179,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 194 项测试(全部离线)
+└── tests/                           # 211 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -190,7 +190,8 @@ facebook-mcp/
     ├── test_m4_cdp.py               # CDP 协议、hybrid 分流、cookie 引导
     ├── test_m4_cdp_integration.py   # 真实 mock DevTools 服务器(HTTP + WebSocket)
     ├── test_m5_message.py           # 发送流程、回退链、收件人解析、Page 身份拦截
-    ├── test_route_doc_ids.py        # doc_id 覆盖:account.json → 注册表默认值
+    ├── test_route_doc_ids.py        # doc_id 覆盖、错误信封、模板提升
+    ├── test_smoke_mcp.py            # smoke 客户端的管道/EOF 行为
     ├── test_logged_out_matrix.py    # 无痕(零 cookie)基线结论的回归测试
     └── test_commit_msg.py           # 提交信息规范校验器自身
 ```
@@ -254,6 +255,7 @@ class HttpResponse:
     text: str
     content: bytes
     # .ok / .json() / .raise_for_status()
+    # .json() 会剥掉 Facebook 的 `for (;;);` 防 JSON 劫持前缀(GraphQL 错误信封带它)
 
 class Transport(Protocol):
     name: str
@@ -302,7 +304,10 @@ class Transport(Protocol):
 
 本层是**纯数据 + 数据变换**,不依赖任何其它层(只有 `base.py` 定义数据类)。
 
-- `base.py` —— `Route(op, method, path, doc_id, friendly_name, requires_auth)`。
+- `base.py` —— `Route(op, method, path, doc_id, friendly_name, requires_auth, anonymous)`。
+  `anonymous=True` 表示**不带会话 cookie** 请求:主页就是这种情况 ——
+  带 cookie 时 Facebook 返回登录态 SPA 外壳(`userVanity` / `timeline_list_feed_units`
+  全部消失),只有未登录变体才内嵌 ServerJS 载荷。
 - `rest.py` —— 页面入口:`PROFILE_PAGE`(`/{username}`)被 `profile_client` 使用;
   `SEARCH_PEOPLE_PAGE` / `SEARCH_PAGES_PAGE` **仅作页面入口记录**(搜索实际走 GraphQL,
   当前无生产代码调用,保留用于导航与诊断)。
@@ -319,6 +324,9 @@ class Transport(Protocol):
   `account.json` 的 `doc_ids`(`{"search.results": "..."}`)。`doc_id` 随每次
   前端 build 轮换、且可能因账号而异,所以运行时值放在凭证存储里,
   刷新它不改源码、也不产生提交。
+- ⚠️ 该覆盖在 **`Services` 构造时**读取一次并按账号缓存(`get_services(account)`
+  为 `lru_cache`)。因此刷新 `account.json` 后需要**重启 MCP server**
+  (或重启 MCP 客户端里的该 server 进程)才生效。
 
 - `templates/` —— 搜索 `variables` 模板。包含 42 个字段(其中 27 个 Relay feature-gate),
   作为**数据**管理;`build_search_variables()` 只替换
@@ -339,7 +347,8 @@ class Transport(Protocol):
   - 公开 API:`fetch_timeline(username) -> Timeline`、`resolve(username) -> Profile`
   - `Timeline.payload_complete`:为 `False` 时表示页面根本没有 timeline 段
     (Facebook 的"精简版"),此时"0 条帖子"并不代表用户没有发帖
-  - **不使用 GraphQL**,无需 `doc_id` / cookie
+  - **不使用 GraphQL**,也**不使用 cookie**:`PROFILE_PAGE.anonymous=True`,
+    请求时跳过会话头。带 cookie 的登录态页面是客户端渲染的空壳,解析会得到 0 条帖子
 - `search_client.py` —— `search(query, category, limit)`:
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, ...)`
   - `_parse_results()`:读 `data.serpResponse.results.edges[*].rendering_strategy.view_model.profile`,
@@ -353,8 +362,9 @@ class Transport(Protocol):
     JS `.click()` 触发不到 React handler)
   - **Page 身份下第三级不可用**:Facebook 不给 Page actor 渲染 profile 的
     `Message` 按钮(Page 不能主动给陌生人发起会话)。判定方式:导出 cookie
-    快照(`SessionState.acting_as_page`)或 CDP 实时 `Network.getCookies` 里
-    有 `i_user`——因为切换身份发生在浏览器里时,快照可能陈旧,以浏览器为准。
+    判断依据是 `i_user` cookie:**实时 `Network.getCookies` 非空时以浏览器为准**
+    (浏览器是权威,快照陈旧也不会误判);只有实时读取失败或返回空时才退回导出快照
+    (`SessionState.acting_as_page`)。
     此时第二级失败就直接报 `UnsupportedError` 并说明原因,不再白等 35s
     轮询一个永不出现的按钮。已有的会话仍可回复(第一、二级不受影响)
   - 输入框识别要求 `aria-label` 匹配 `^Write to .+`(名字非空),
@@ -585,6 +595,8 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | Relay `errors` | **未登录**时的 `rate limit`(code `1675004`) | `AuthError` |
 | Relay `errors` | 含 `log in` / `login` / `permission` / `checkpoint` 等 | `AuthError` |
 | Relay `errors` | 其他 | `ParseError` |
+| 响应体 | 不是 JSON(如 `for (;;);` 后仍是 HTML) | `ParseError`,提示 `doc_id` 可能已轮换 |
+| 旧式信封 | `{"error": <code>, "errorSummary": ...}`(无 `errors`) | `ParseError`;`1357031`(content no longer available)会点名 `doc_id` 已轮换 |
 
 **对 MCP 的表现**:`search_*` / `get_*` 抛异常交由 SDK 转成 `isError`;
 `send_message` 由 `MessageService` 捕获并返回 `SendResult(ok=False, error=...)`。
@@ -616,6 +628,16 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 > (无 `timeline_list_feed_units`),表现为"查不到帖子"而非报错。
 > `_DEFAULT_HEADERS` 固定携带该头,`Timeline.payload_complete` 会标记
 > "页面没有 timeline 段",`PostService` 在错误信息里提示重试。
+
+**登录态会改变返回的 HTML 形态**(2026-10 实测,同一 URL 同一时刻):
+
+| 请求方式 | 大小 | `userVanity` | `timeline_list_feed_units` | 结论 |
+|---|---|---|---|---|
+| 匿名 | 961 KB | 2 | 4 | 内嵌完整 ServerJS 载荷 |
+| 带 `c_user`/`xs` | 1 181 KB | **0** | **0** | 登录态 SPA 外壳,数据靠 GraphQL 拉取 |
+
+因此**主页必须匿名抓取**;这也是 `Route.anonymous` 存在的原因。
+早期实现会带上 cookie,导致「配置了搜索凭据后取帖子时间反而失败」。
 
 **结论**
 
@@ -694,7 +716,10 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
 
 ### 8.6 Facebook 改版后的维护流程
 
-1. 找到出错的工具,确认是 `doc_id` 过期(`ParseError: ... stale`)还是布局变化。
+1. 找到出错的工具,从 `ParseError` 的信息判断原因:
+   - `doc_id ... was rejected` / `Facebook error 1357031` → **`doc_id` 轮换**(最常见);
+   - `...template are stale` → `variables` 模板过期;
+   - `composer did not appear` 之类 → DOM 布局变化。
 2. 用 `tools/sniff.py` 重新抓包:
 
    ```bash
@@ -708,9 +733,11 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
    并(仅限 `PROMOTED_TEMPLATES` 白名单)重写
    `routes/templates/search_results.json`;其余抓包结果只留在 gitignored 的
    `.cache/routes.json`,避免死模板(及其中的会话 id)进 wheel。
-4. 正常情况下到此为止 —— 不需要改 `routes/graphql.py`。只有想把“新装即用”的
-   bootstrap 默认值推上去时,才把抓到的 `doc_id` 提交进 `Route(...)`。
-5. 仅动 `routes/`,不改 client / service 逻辑。
+4. 正常情况下到此为止 —— 不需要改 `routes/graphql.py`。
+   **重启 MCP server** 让新的 `doc_ids` 生效(§5.4)。
+5. 只有想把“新装即用”的 bootstrap 默认值推上去时,才把抓到的 `doc_id` 提交进
+   `Route(...)`。`tools/sniff.py` 打印的 route 表就是给这一步的,平时不必抄进源码。
+6. 仅动 `routes/`,不改 client / service 逻辑。
 
 ---
 
@@ -760,7 +787,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(194 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(211 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -805,7 +832,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:194 项,覆盖 11 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:211 项,覆盖 12 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
