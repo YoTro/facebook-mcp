@@ -74,6 +74,6 @@ class ParseError(TransportError):
 
 
 class UnsupportedError(FacebookError):
-    """The configured transport does not support the requested capability."""
+    """The configured transport or account type cannot do this."""
 
     code = "unsupported"

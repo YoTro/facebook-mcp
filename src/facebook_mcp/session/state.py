@@ -23,6 +23,25 @@ class SessionState:
         return self.cookies.get("c_user")
 
     @property
+    def impersonator_id(self) -> str | None:
+        """The personal id behind ``c_user`` while acting as another identity.
+
+        Facebook hands out ``i_user`` (the admin's own id) alongside ``c_user``
+        (the Page id) once a session is switched into a Page.
+        """
+        return self.cookies.get("i_user")
+
+    @property
+    def acting_as_page(self) -> bool:
+        """Whether the session is switched into a Page identity.
+
+        Pages behave differently in the UI: they get a page inbox instead of
+        Messenger, and Facebook does not render the profile "Message" button
+        for them (a Page cannot start a conversation with a stranger).
+        """
+        return bool(self.impersonator_id)
+
+    @property
     def is_authenticated(self) -> bool:
         return bool(self.cookies.get("c_user") and self.cookies.get("xs"))
 

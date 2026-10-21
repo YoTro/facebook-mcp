@@ -389,6 +389,15 @@ layer (`base.py` only defines dataclasses).
     row` → `profile "Message" button` (a never-messaged recipient needs the third
     one; the button requires a real mouse event via `Input.dispatchMouseEvent`,
     because JS `.click()` does not reach React handlers)
+  - **the third fallback is unavailable to a Page**: Facebook does not render the
+    profile `Message` button for a Page actor (a Page cannot start a conversation
+    with a stranger). Detection looks for an `i_user` cookie in the exported
+    snapshot (`SessionState.acting_as_page`) *and* in the live
+    `Network.getCookies` response, because an identity switch performed in the
+    browser leaves the snapshot stale — the browser wins. When the thread row
+    fails there, the client raises `UnsupportedError` with the reason instead of
+    polling 35s for a button that will never appear. Existing threads still work
+    (levels 1-2).
   - composer detection requires an `aria-label` matching `^Write to .+` (a
     non-empty name), which excludes the thread list's `Write to ` new-message
     search box
@@ -725,6 +734,12 @@ curl_cffi; the browser is only needed for one-off cookie bootstrapping.
 
 → The protocol cannot be forged cheaply, so `send_message` **drives the real UI
 through CDP**.
+
+**The actor type changes the UI**: while acting as a Page, Facebook opens the page
+inbox instead of personal Messenger and does **not** render the `Message` button
+on someone else's profile (a Page cannot start a conversation with a stranger).
+The third fallback therefore only works for personal accounts; see
+`acting_as_page` in §5.5.
 
 ### 8.4 Two Chrome remote-debugging pitfalls (already handled)
 

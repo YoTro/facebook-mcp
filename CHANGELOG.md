@@ -29,6 +29,17 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 - Template promotion is atomic, so an interrupted capture can no longer leave a
   truncated `search_results.json` behind.
 
+### Fixed
+
+- `send_message` against a session acting as a Page wasted ~35s polling for the
+  profile "Message" button, which Facebook never renders for a Page (a Page
+  cannot start a conversation with a stranger), and then blamed "the page layout
+  changed". The client now detects the Page actor from the `i_user` cookie —
+  in the exported snapshot (`SessionState.acting_as_page`) and in the live
+  `Network.getCookies` response, so a switch made in the browser is seen too —
+  and fails immediately with the real reason.
+  Existing threads and the thread-list fallback are unaffected.
+
 ### Planned
 
 - Capture the Messenger send mutation (service-worker / Lightspeed) and replace

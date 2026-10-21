@@ -48,6 +48,7 @@ class FakeCdp:
         send_button: bool = True,
         thread_row: bool = True,
         message_button: bool = True,
+        live_cookies: dict[str, str] | None = None,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
     ) -> None:
         self.composer_on_thread = composer_on_thread
@@ -58,6 +59,7 @@ class FakeCdp:
         self.send_button = send_button
         self.thread_row = thread_row
         self.message_button = message_button
+        self.live_cookies = live_cookies or {}
         self.url = url
 
         self.composer_open = False
@@ -82,6 +84,9 @@ class FakeCdp:
         elif "profile.php" in url:
             self.url = url
             self.composer_open = False
+
+    def cookies(self, url: str | None = None) -> dict[str, str]:
+        return dict(self.live_cookies)
 
     def request(self, req):  # pragma: no cover - unused
         raise AssertionError("not used")
@@ -145,6 +150,15 @@ def _client(transport, **kwargs) -> MessageClient:
     return MessageClient(transport, session, Settings(), **kwargs)
 
 
+def _page_client(transport, **kwargs) -> MessageClient:
+    """A client whose session is switched into a Page (``i_user`` present)."""
+    session = SessionManager(
+        Settings(cookie="c_user=100000000000001; xs=2; i_user=1", cookie_file=None)
+    )
+    assert session.state.acting_as_page is True
+    return MessageClient(transport, session, Settings(), **kwargs)
+
+
 # --- happy path ---------------------------------------------------------
 
 
@@ -205,6 +219,88 @@ def test_no_message_button_on_profile_raises() -> None:
     )
     with pytest.raises(ParseError, match="composer did not appear"):
         _client(cdp).send("200000000000001", "hi")
+
+
+# --- page actors --------------------------------------------------------
+#
+# A Page cannot start a conversation from a profile: Facebook does not render
+# the "Message" button for it. Detected from the i_user cookie, so the client
+# refuses instead of polling for a button that will never appear.
+
+
+def test_page_actor_refuses_profile_fallback() -> None:
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        message_button=False,
+    )
+    with pytest.raises(UnsupportedError, match="acting as a Page"):
+        _page_client(cdp).send("100000000000003", "hi")
+
+    # It gave up before opening the profile page (and before the 35s of polling).
+    assert cdp.navigations == ["https://www.facebook.com/messages/t/100000000000003/"]
+    assert cdp.mouse_clicks == 0
+    assert cdp.inserted == []
+
+
+def test_page_actor_can_reply_in_existing_thread() -> None:
+    cdp = FakeCdp(composer_on_thread=True)
+    result = _page_client(cdp).send("100000000000003", "hi")
+    assert result.ok is True
+    assert cdp.sent is True
+
+
+def test_page_actor_can_use_thread_row() -> None:
+    cdp = FakeCdp(composer_on_thread=False, composer_after_row_click=True)
+    result = _page_client(cdp).send("100000000000003", "hi")
+    assert result.ok is True
+    assert cdp.sent is True
+
+
+def test_personal_account_still_uses_profile_fallback() -> None:
+    """The refusal must not leak into personal sessions."""
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+    )
+    result = _client(cdp).send("100000000000003", "hi")
+    assert result.ok is True
+    assert cdp.navigations[-1] == "https://www.facebook.com/profile.php?id=100000000000003"
+    assert cdp.mouse_clicks == 1
+
+
+def test_page_actor_detected_from_live_browser_cookies() -> None:
+    """The exported jar is a snapshot; the browser knows the current identity."""
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        live_cookies={"c_user": "100000000000001", "i_user": "1"},
+    )
+    with pytest.raises(UnsupportedError, match="acting as a Page"):
+        _client(cdp).send("100000000000003", "hi")
+    assert cdp.navigations == ["https://www.facebook.com/messages/t/100000000000003/"]
+
+
+def test_live_cookies_without_i_user_are_not_a_page() -> None:
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+        live_cookies={"c_user": "100000000000001", "xs": "2"},
+    )
+    assert _client(cdp).send("100000000000003", "hi").ok is True
+    assert cdp.mouse_clicks == 1
+
+
+def test_acting_as_page_comes_from_i_user_cookie() -> None:
+    personal = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    assert personal.state.impersonator_id is None
+    assert personal.state.acting_as_page is False
+
+    page = SessionManager(Settings(cookie="c_user=9; xs=2; i_user=1", cookie_file=None))
+    assert page.state.impersonator_id == "1"
+    assert page.state.acting_as_page is True
 
 
 def test_composer_rejects_text_aborts_before_send() -> None:

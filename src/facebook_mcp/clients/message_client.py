@@ -13,6 +13,12 @@ the Chrome DevTools Protocol instead:
 2. focus the composer, insert the text
 3. click the *"Press enter to send"* button (Enter key as fallback)
 4. confirm success by watching the composer clear
+
+The third fallback is unavailable to a Page: Facebook does not render the
+profile "Message" button while the session acts as a Page, because a Page
+cannot start a conversation with someone who never messaged it. Such a session
+is detected from the ``i_user`` cookie and fails fast with an explanation
+instead of polling for a button that will never appear.
 """
 
 from __future__ import annotations
@@ -38,6 +44,13 @@ MESSENGER_BASE = "https://www.facebook.com/messages/t/"
 PROFILE_BASE = "https://www.facebook.com/profile.php?id="
 
 _ID_PARAM = re.compile(r"[?&]id=(\d+)")
+
+_PAGE_ACTOR_REFUSAL = (
+    "cannot start a conversation with {uid}: this session is acting as a Page "
+    '(i_user cookie), and Facebook hides the profile "Message" button for Page '
+    "actors. Reply to an existing thread instead, or use a personal account "
+    "(FB_ACCOUNT=<name>)."
+)
 
 # Shared resolver for the *conversation* composer.
 #
@@ -154,7 +167,12 @@ class MessageClient(BaseClient):
             return self._thread_id(cdp, uid)
 
         # 2) No existing thread (e.g. a page never messaged before): start one
-        #    from the profile's "Message" button.
+        #    from the profile's "Message" button. A Page cannot do this —
+        #    Facebook does not render the button for Page actors — so refuse
+        #    before polling 15s + 20s for something that will never appear.
+        if self._acting_as_page(cdp):
+            raise UnsupportedError(_PAGE_ACTOR_REFUSAL.format(uid=uid))
+
         logger.info("no conversation found; starting one from the profile page")
         if self._start_from_profile(cdp, uid) and self._wait_for_composer(cdp, timeout=20):
             return self._thread_id(cdp, uid)
@@ -163,6 +181,30 @@ class MessageClient(BaseClient):
             f"Messenger composer did not appear for {uid}; the recipient may not "
             "accept messages, the thread id may be wrong, or the page layout changed"
         )
+
+    def _acting_as_page(self, cdp: CdpTransport) -> bool:
+        """Whether the *live* session is switched into a Page identity.
+
+        ``state.cookies`` is a snapshot taken when the jar was exported, so an
+        identity switch performed in the browser afterwards would not show up
+        there. The browser is the source of truth while it is attached, so ask
+        it before falling back to the jar. Costs one round trip, and only on the
+        path where the first two fallbacks already failed.
+        """
+        if self._session.state.acting_as_page:
+            return True
+        try:
+            live = cdp.cookies()
+        except CdpError as exc:
+            logger.debug("could not read live cookies: %s", exc)
+            return False
+        if live.get("i_user"):
+            logger.debug(
+                "acting as a Page per the live browser (i_user); the exported "
+                "cookie jar does not include it"
+            )
+            return True
+        return False
 
     def _start_from_profile(self, cdp: CdpTransport, uid: str) -> bool:
         """Open the profile and click its "Message" button."""
@@ -179,7 +221,11 @@ class MessageClient(BaseClient):
                 return self._click_at(cdp, position)
             time.sleep(0.5)
 
-        logger.info("no Message button found on the profile of %s", uid)
+        logger.info(
+            "no Message button found on the profile of %s (a Page actor never gets "
+            "one; otherwise the profile may not accept messages)",
+            uid,
+        )
         return False
 
     @staticmethod

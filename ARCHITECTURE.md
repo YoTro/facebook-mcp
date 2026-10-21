@@ -348,6 +348,12 @@ class Transport(Protocol):
   - `_open_thread()`:**三级回退** `直接线程 URL` → `会话列表点击` → `主页 Message 按钮`
     (从未聊过的对象必须走第三级;按钮需用真实鼠标事件 `Input.dispatchMouseEvent`,
     JS `.click()` 触发不到 React handler)
+  - **Page 身份下第三级不可用**:Facebook 不给 Page actor 渲染 profile 的
+    `Message` 按钮(Page 不能主动给陌生人发起会话)。判定方式:导出 cookie
+    快照(`SessionState.acting_as_page`)或 CDP 实时 `Network.getCookies` 里
+    有 `i_user`——因为切换身份发生在浏览器里时,快照可能陈旧,以浏览器为准。
+    此时第二级失败就直接报 `UnsupportedError` 并说明原因,不再白等 35s
+    轮询一个永不出现的按钮。已有的会话仍可回复(第一、二级不受影响)
   - 输入框识别要求 `aria-label` 匹配 `^Write to .+`(名字非空),
     以排除会话列表里那个 `Write to ` 的新建会话搜索框
   - `_compose_and_send()`:聚焦 → `Input.insertText` → **校验输入框已接收文本**
@@ -656,6 +662,10 @@ jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))   # 实测 25724 == 25724
 | 线索 | `bootloader-endpoint` 加载 `LSBumpThread` / `LSReplaceOptimisticMessage` | 走 Lightspeed 同步 |
 
 → 无法以低成本伪造协议,故 `send_message` 采用 **CDP 驱动真实 UI**。
+
+**actor 类型会影响 UI**:以 Page 身份操作时,Facebook 进入 page inbox 而不是个人
+Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不能主动发起会话)。
+因此第 3 级回退只对个人账号有效;Page 账号的判定见 §5.5 的 `acting_as_page`。
 
 ### 8.4 Chrome 远程调试的两个坑(已在代码中解决)
 
