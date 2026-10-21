@@ -26,6 +26,14 @@ class Route:
     friendly_name: str | None = None
     """GraphQL ``fb_api_req_friendly_name``."""
     requires_auth: bool = False
+    anonymous: bool = False
+    """Never send session cookies for this route.
+
+    Facebook serves the profile page as a logged-in SPA shell when cookies are
+    present, and only the *logged-out* variant embeds the ServerJS payload
+    (``timeline_list_feed_units``) the scraper reads. Such routes must be
+    fetched without credentials even when a session is configured.
+    """
 
     def url(self, **params: str) -> str:
         """Render the route path, substituting ``{placeholders}``."""

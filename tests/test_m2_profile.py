@@ -207,3 +207,48 @@ def _client_with_status(code: int) -> ProfileClient:
 def test_http_status_translation(status: int, error: type[Exception]) -> None:
     with pytest.raises(error):
         _client_with_status(status).fetch_timeline("someuser")
+
+
+# --- profile pages are fetched anonymously on purpose ---------------------
+#
+# With cookies, Facebook serves the logged-in SPA shell: no userVanity, no
+# userID, no timeline_list_feed_units. Only the logged-out variant carries the
+# ServerJS payload, so PROFILE_PAGE must never send the session cookie — even
+# when the account has one configured (which is the recommended setup).
+
+
+def test_profile_route_is_marked_anonymous() -> None:
+    assert rest.PROFILE_PAGE.anonymous is True
+    assert rest.SEARCH_PEOPLE_PAGE.anonymous is False
+
+
+def test_profile_request_omits_the_cookie_header() -> None:
+    transport = _FakeTransport(
+        HttpResponse(
+            status_code=200,
+            url="https://www.facebook.com/exampleuser",
+            headers={},
+            text=FIXTURE.read_text(encoding="utf-8"),
+            content=b"",
+        )
+    )
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = ProfileClient(transport, session, Settings())
+
+    client.fetch_timeline("exampleuser")
+
+    sent = transport.requests[0]
+    assert "Cookie" not in sent.headers
+
+
+def test_authenticated_routes_still_send_cookies() -> None:
+    transport = _FakeTransport(
+        HttpResponse(status_code=200, url="u", headers={}, text="{}", content=b"")
+    )
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = ProfileClient(transport, session, Settings())
+
+    from facebook_mcp.routes.base import Route
+
+    client._request(Route(op="x", method="GET", path="/x"))
+    assert transport.requests[-1].headers.get("Cookie") == "c_user=1; xs=2"

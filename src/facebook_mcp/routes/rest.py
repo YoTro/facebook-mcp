@@ -12,7 +12,14 @@ from __future__ import annotations
 
 from .base import Route
 
-PROFILE_PAGE = Route(op="profile.page", method="GET", path="/{username}")
+PROFILE_PAGE = Route(
+    op="profile.page",
+    method="GET",
+    path="/{username}",
+    # Logged-in visitors get a client-rendered shell with no timeline payload,
+    # so this route is always fetched anonymously (see Route.anonymous).
+    anonymous=True,
+)
 
 SEARCH_PEOPLE_PAGE = Route(
     op="search.people.page",
