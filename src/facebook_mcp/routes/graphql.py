@@ -34,7 +34,7 @@ SEARCH_RESULTS = Route(
     op="search.results",
     method="POST",
     path="/api/graphql/",
-    doc_id="28778193718476003",
+    doc_id="39411546341825607",
     friendly_name="SearchCometResultsPaginatedResultsQuery",
     requires_auth=True,
 )
