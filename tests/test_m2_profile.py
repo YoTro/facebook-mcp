@@ -273,3 +273,36 @@ def test_httponly_cookies_are_parsed(tmp_path: Path) -> None:
     assert state.cookies["xs"] == "token"
     assert state.cookies["datr"] == "d"
     assert state.is_authenticated is True
+
+
+def test_latest_post_time_fails_when_no_post_carries_a_time() -> None:
+    """ok=True with latest_post_time=None would claim a time the tool has not got."""
+    from facebook_mcp.core.models import Post, Profile
+    from facebook_mcp.core.models.profile import Timeline
+    from facebook_mcp.services.post_service import PostService
+
+    class _Stub:
+        def fetch_timeline(self, username: str) -> Timeline:
+            return Timeline(
+                profile=Profile(uid="1", username=username),
+                posts=[Post(id="p1", text="one"), Post(id="p2", text="two")],
+            )
+
+    result = PostService(_Stub()).get_latest_post_time("exampleuser")  # type: ignore[arg-type]
+    assert result.ok is False
+    assert result.latest_post_time is None
+    assert "publish time" in (result.error or "")
+
+
+def test_latest_post_time_reports_missing_posts() -> None:
+    from facebook_mcp.core.models import Profile
+    from facebook_mcp.core.models.profile import Timeline
+    from facebook_mcp.services.post_service import PostService
+
+    class _Stub:
+        def fetch_timeline(self, username: str) -> Timeline:
+            return Timeline(profile=Profile(uid="1", username=username), posts=[])
+
+    result = PostService(_Stub()).get_latest_post_time("exampleuser")  # type: ignore[arg-type]
+    assert result.ok is False
+    assert "no posts found" in (result.error or "")

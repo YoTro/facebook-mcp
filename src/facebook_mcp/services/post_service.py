@@ -40,6 +40,20 @@ class PostService:
                 error=f"no posts found for '{username}'{hint}",
             )
 
+        if latest.created_at is None:
+            # Posts exist but none of them carried a publish time: reporting
+            # ok=True with latest_post_time=None would claim a success the tool
+            # cannot deliver, and callers would store a null timestamp.
+            return PostTimeResult(
+                ok=False,
+                username=username,
+                error=(
+                    f"found {len(timeline.posts)} post(s) for '{username}' but none "
+                    "carried a publish time; the timeline payload shape probably "
+                    "changed (ParseError)"
+                ),
+            )
+
         return PostTimeResult(
             ok=True,
             username=timeline.profile.username or username,

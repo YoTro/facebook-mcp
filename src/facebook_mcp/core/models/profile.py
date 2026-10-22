@@ -33,7 +33,12 @@ class Timeline(BaseModel):
 
     @property
     def latest_post(self) -> Post | None:
-        """The newest post, if any."""
+        """The newest post, if any.
+
+        Postponed entries are preferred; the first post in payload order is
+        returned only when *no* post carried a publish time. Callers that need a
+        time must check ``created_at`` — Facebook does not guarantee it.
+        """
         timed = [p for p in self.posts if p.created_at is not None]
         if timed:
             return max(timed, key=lambda p: p.created_at)
