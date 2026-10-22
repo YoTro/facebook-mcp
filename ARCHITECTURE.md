@@ -412,12 +412,16 @@ class Transport(Protocol):
     防止期间被 re-render 换成别人的会话
   - `_compose_and_send()`:聚焦 → `Input.insertText` → 校验输入框已接收文本
     → 点 `Press enter to send`(回退 Enter)→ 轮询输入框清空
-  - **`SendResult.delivery` 区分三种状态**:`not_sent`(什么都没提交,可安全重试)、
+  - **`SendResult.delivery` 区分四种状态**:`not_sent`(什么都没提交,可安全重试)、
     `submitted`(已交给 Messenger,但 Web UI 拿不到服务端回执,重试可能重复)、
-    `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本)。
-    只有 `unknown` 走 `SendUncertainError`(此时 `ok=False`);`submitted` 是**成功返回**
-    (`ok=True`)。`MessageService` 先捕获 `SendUncertainError` → `unknown`,
-    其余 `FacebookError` → `not_sent`,所以点击前的失败绝不会被标成结果未知
+    `rejected`(Messenger 把消息标成未发出,`SendRejectedError`,可安全重试)、
+    `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本,`SendUncertainError`)。
+    只有后两种 `ok=False`,`submitted` 是成功返回。
+    `MessageService` 依次捕获 `SendUncertainError` / `SendRejectedError` / 其他
+    `FacebookError`,点击前的失败绝不会被标成结果未知
+  - **拒绝检测是 best-effort**:失败气泡中的 "Couldn't send" 是 UI 文案(已收录中/英/西),
+    发送前后各数一次失败气泡,只有**新增**才算拒绝,避免历史失败污染后续发送;
+    同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
   - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
 
 ### 5.6 L4 services
@@ -620,6 +624,7 @@ server.send_message(recipient="exampleuser", text="...")
       → Input.insertText → 校验输入框已接收
       → 点 "Press enter to send"(回退:Enter 键)
       → 轮询输入框是否清空
+      → 若新出现 "Couldn't send" 气泡 → SendRejectedError(rejected)
   → SendResult(ok=True, delivery="submitted", thread_id=...)
 ```
 
@@ -673,7 +678,7 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | `get_user_latest_post_time` | **不抛异常**,返回 `PostTimeResult(ok=False, error=...)`(解析不到主页/无帖子都走这里) |
 | `get_user_recent_posts` | 抛异常 → SDK 转成 `isError` |
 | `search_people` / `search_pages` | 抛异常 → SDK 转成 `isError` |
-| `send_message` | `MessageService` 捕获 → `SendResult(ok=False, delivery="not_sent" 或 "unknown", error=...)` |
+| `send_message` | `MessageService` 捕获 → `SendResult(ok=False, delivery="not_sent"｜"rejected"｜"unknown", error=...)` |
 
 ---
 
@@ -949,7 +954,9 @@ MCP 层只做转发,不含业务逻辑。
   `ParseError`,需要更新 client 里的选择器;这也是 §8.6/§9.2 把「改版只改 routes/」
   限定在接口参数与模板上的原因。发送前还会校验收件人,读不到名字时宁可拒发。
 - **送达不可证**:Web UI 不暴露服务端回执,`delivery="submitted"` 只代表已提交,
-  不代表对方收到;`unknown` 必须人工确认会话后才能重试。
+  不代表对方收到;`unknown` 必须人工确认会话后才能重试。实测中 FB 会先清空输入框、
+  再在气泡上标 "Couldn't send"(且该气泡的无障碍标签仍写 "Message sent"),
+  因此 `rejected` 依赖 UI 文案匹配,属于 best-effort,换语言/改版可能失效。
 - **合规**:仅用于授权账号;发送营销消息需遵守 Facebook 平台政策与
   反垃圾法规(如 CAN-SPAM、GDPR)。
 

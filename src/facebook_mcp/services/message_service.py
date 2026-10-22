@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..clients.message_client import MessageClient
-from ..core.exceptions import FacebookError, SendUncertainError
+from ..core.exceptions import FacebookError, SendRejectedError, SendUncertainError
 from ..core.logger import get_logger
 from ..core.models import SendResult
 
@@ -28,6 +28,14 @@ class MessageService:
         except SendUncertainError as exc:
             logger.warning("send_message outcome unknown: %s", exc)
             return SendResult(ok=False, delivery="unknown", error=str(exc))
+        except SendRejectedError as exc:
+            logger.warning("send_message rejected by Messenger: %s", exc)
+            return SendResult(
+                ok=False,
+                delivery="rejected",
+                thread_id=exc.thread_id,
+                error=str(exc),
+            )
         except FacebookError as exc:
             logger.warning("send_message failed: %s", exc)
             return SendResult(ok=False, delivery="not_sent", error=str(exc))

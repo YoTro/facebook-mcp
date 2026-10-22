@@ -83,6 +83,16 @@ class SendUncertainError(FacebookError):
     code = "send_uncertain"
 
 
+class SendRejectedError(FacebookError):
+    """Messenger marked the submitted message as unsent."""
+
+    code = "send_rejected"
+
+    def __init__(self, message: str = "", *, thread_id: str | None = None) -> None:
+        super().__init__(message)
+        self.thread_id = thread_id
+
+
 class UnsupportedError(FacebookError):
     """The configured transport or account type cannot do this."""
 

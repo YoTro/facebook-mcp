@@ -191,6 +191,17 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   bullet count, table rows and fenced-code shape. It exists because a one-sided
   edit landed twice; `tests/test_check_docs.py` proves it fails on exactly that.
 
+- `delivery="rejected"`: a live test against a real page showed Facebook clearing
+  the composer and *then* stamping the bubble "Couldn't send" — so
+  `send_message` reported `ok=True/submitted` for a message that never existed
+  in the thread (the same bubble's accessibility label even says "Message
+  sent"). Failed bubbles are now counted before and after the click and polled
+  for up to 4s; only a *new* marker counts, so an older failure cannot taint a
+  later send. `SendRejectedError` carries the thread id and maps to
+  `delivery="rejected"` (`ok=False`) — safe to retry, though it will probably
+  fail the same way. The marker is localised UI text (en/zh/es), so the check is
+  best-effort and documented as such.
+
 ### Planned
 
 - Capture the Messenger send mutation (service-worker / Lightspeed) and replace

@@ -56,6 +56,8 @@ class FakeCdp:
         live_cookies: dict[str, str] | None = None,
         composer_target: str | None = None,
         redirect_thread: str | None = None,
+        send_fails: bool = False,
+        existing_failures: int = 0,
         draft: str = "",
         vanish_after_send: bool = False,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
@@ -71,6 +73,9 @@ class FakeCdp:
         self.live_cookies = live_cookies or {}
         self.composer_target = composer_target
         self.redirect_thread = redirect_thread
+        self.send_fails = send_fails
+        self.existing_failures = existing_failures
+        self.send_failed = False
         self.draft = draft
         self.vanish_after_send = vanish_after_send
         self.url = url
@@ -126,6 +131,8 @@ class FakeCdp:
             if self.clears_after_send:
                 self.composer_text = ""
                 self.sent = True
+                if self.send_fails:
+                    self.send_failed = True
                 if self.vanish_after_send:
                     self.composer_open = False
             return {}
@@ -164,9 +171,13 @@ class FakeCdp:
             if self.clears_after_send:
                 self.composer_text = ""
                 self.sent = True
+                if self.send_fails:
+                    self.send_failed = True
                 if self.vanish_after_send:
                     self.composer_open = False
             return True
+        if "const markers =" in expression:
+            return self.existing_failures + (1 if self.send_failed else 0)
         if "return composerTarget" in expression:
             return self.composer_target
         if "composer.innerText" in expression:
@@ -605,3 +616,28 @@ def test_failure_before_the_click_is_reported_as_not_sent() -> None:
     assert result.ok is False
     assert result.delivery == "not_sent"
     assert cdp.sent is False
+
+
+def test_rejected_send_is_reported_as_rejected() -> None:
+    """Messenger clears the composer and then marks the bubble "Couldn't send"."""
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(composer_on_thread=True, send_fails=True)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
+
+    assert result.ok is False
+    assert result.delivery == "rejected"
+    assert result.thread_id == "200000000000001"
+    assert "unsent" in (result.error or "")
+    assert cdp.send_failed is True
+
+
+def test_an_older_failed_bubble_does_not_poison_a_later_send() -> None:
+    """Only *new* failures count, otherwise one bad message taints the thread."""
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(composer_on_thread=True, existing_failures=1)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
+
+    assert result.ok is True
+    assert result.delivery == "submitted"

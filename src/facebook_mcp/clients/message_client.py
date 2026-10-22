@@ -23,6 +23,7 @@ instead of polling for a button that will never appear.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -31,6 +32,7 @@ from ..core.config import Settings
 from ..core.exceptions import (
     FacebookError,
     ParseError,
+    SendRejectedError,
     SendUncertainError,
     TransportError,
     UnsupportedError,
@@ -92,6 +94,37 @@ _RESOLVE_COMPOSER = """
 """
 
 
+# Messenger renders this marker inside a bubble it could not send. It is UI
+# text, so it is localised — the list is best-effort and easy to extend. The
+# a11y label of the same bubble still says "Message sent", so the text is the
+# only usable signal.
+_FAILED_BUBBLE_MARKERS = ("Couldn't send", "无法发送", "無法傳送", "No se pudo enviar")
+
+
+def _failed_bubbles(cdp: BrowserTransport) -> int:
+    """Number of bubbles in the open conversation that Messenger marked unsent."""
+    markers = ", ".join(json.dumps(marker) for marker in _FAILED_BUBBLE_MARKERS)
+    count: Any = cdp.evaluate(
+        _script(
+            f"""
+  const markers = [{markers}];
+  const main = document.querySelector('[role="main"]');
+  if (!main) return 0;
+  let failed = 0;
+  for (const article of main.querySelectorAll('[role="article"]')) {{
+    const text = article.innerText || '';
+    if (markers.some(marker => text.includes(marker))) failed += 1;
+  }}
+  return failed;
+"""
+        )
+    )
+    try:
+        return int(count or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _same_name(actual: str, expected: str) -> bool:
     """Whether two Messenger display names plausibly denote the same account.
 
@@ -136,7 +169,12 @@ class MessageClient(BaseClient):
         cdp = self._require_browser()
 
         thread_id, composer_target = self._open_thread(cdp, uid)
-        self._compose_and_send(cdp, text, expected_target=composer_target)
+        try:
+            self._compose_and_send(cdp, text, expected_target=composer_target)
+        except SendRejectedError as exc:
+            # The caller needs to know which thread was affected.
+            exc.thread_id = thread_id
+            raise
 
         return SendResult(
             ok=True,
@@ -546,16 +584,48 @@ class MessageClient(BaseClient):
             )
 
         # The click (or Enter) is what puts the message on the wire.
+        failed_before = _failed_bubbles(cdp)
         self._pace()
         if not self._click_send(cdp):
             self._press_enter(cdp)
 
-        if not self._wait_until_cleared(cdp):
+        cleared = self._wait_until_cleared(cdp)
+        # A rejected message also clears the composer: Messenger moves the text
+        # into a bubble and *then* stamps it "Couldn't send", so the marker can
+        # appear seconds later. Only a *new* failure counts, so an older one
+        # cannot taint this send.
+        if cleared and self._wait_for_rejection(cdp, failed_before):
+            raise SendRejectedError(
+                'Messenger marked the message as unsent ("Couldn\'t send"); it did '
+                "not reach the recipient — retrying is safe but will probably fail "
+                "the same way"
+            )
+
+        if not cleared:
             raise SendUncertainError(
                 "message may have been sent: the composer still contains text after "
                 "clicking send, so the outcome is unknown — check the conversation "
                 "before resending"
             )
+
+    def _wait_for_rejection(
+        self,
+        cdp: BrowserTransport,
+        failed_before: int,
+        timeout: float = 4.0,
+    ) -> bool:
+        """Wait for a *new* unsent bubble; the marker lags the send by seconds.
+
+        Live measurement: the bubble appears at once, but Messenger stamps it
+        "Couldn't send" a second or two later, so a single check right after the
+        composer clears misses it. Best-effort by nature: the marker is UI text.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _failed_bubbles(cdp) > failed_before:
+                return True
+            time.sleep(0.4)
+        return False
 
     @staticmethod
     def _composer_text(cdp: BrowserTransport) -> str | None:

@@ -90,8 +90,9 @@ def search_pages(q: str, limit: int = 10, account: str | None = None) -> list[Se
         "logged-in browser (FB_TRANSPORT_MODE=auto or cdp). The result reports "
         "'delivery': 'not_sent' (nothing was submitted, safe to retry), "
         "'submitted' (handed to Messenger; no server acknowledgement is readable, "
-        "so a retry may duplicate), or 'unknown' (send was issued but could not "
-        "be verified — check the conversation first). " + _ACCOUNT_DOC
+        "so a retry may duplicate), 'rejected' (Messenger marked it unsent, so it "
+        "never arrived and a retry is safe), or 'unknown' (send was issued but "
+        "could not be verified — check the conversation first). " + _ACCOUNT_DOC
     )
 )
 def send_message(recipient: str, text: str, account: str | None = None) -> SendResult:

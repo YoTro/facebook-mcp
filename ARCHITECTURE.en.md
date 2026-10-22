@@ -467,12 +467,20 @@ layer (`base.py` only defines dataclasses).
   - `_compose_and_send()`: focus → `Input.insertText` → verify the composer
     actually received the text → click `Press enter to send` (fallback: Enter)
     → poll until the composer clears
-  - **`SendResult.delivery` distinguishes three states**: `not_sent` (nothing was
+  - **`SendResult.delivery` distinguishes four states**: `not_sent` (nothing was
     submitted, safe to retry), `submitted` (handed to Messenger, but the web UI
-    exposes no server acknowledgement, so a retry may duplicate) and `unknown`
-    (send was clicked and the outcome cannot be observed: the composer vanished
-    or still holds text). The last two raise `SendUncertainError` instead of
-    masquerading as an ordinary failure
+    exposes no server acknowledgement, so a retry may duplicate), `rejected`
+    (Messenger marked it unsent — `SendRejectedError`, safe to retry) and
+    `unknown` (send clicked, outcome unobservable — `SendUncertainError`). Only
+    the last two are `ok=False`; `submitted` is a **success**. `MessageService`
+    maps `SendUncertainError` → `unknown`, `SendRejectedError` → `rejected`, any
+    other `FacebookError` → `not_sent`, so nothing before the click can be
+    reported as unknown.
+  - **rejection detection is best-effort**: the "Couldn't send" marker is UI text
+    (en/zh/es are recognised). Failed bubbles are counted before and after, and
+    only a *new* one counts, so an older failure cannot taint a later send. The
+    same bubble's accessibility label still says "Message sent", which is why the
+    text cannot be used to confirm delivery.
   - `send_via_graphql()`: a retained protocol entry point that currently raises
     `UnsupportedError` and explains why
 
@@ -689,6 +697,7 @@ server.send_message(recipient="exampleuser", text="...")
       → Input.insertText → verify the composer received it
       → click "Press enter to send" (fallback: Enter key)
       → poll until the composer is empty
+      → a *new* "Couldn't send" bubble → SendRejectedError(rejected)
   → SendResult(ok=True, delivery="submitted", thread_id=...)
 ```
 
@@ -739,7 +748,7 @@ TemplateError (routes/templates) — RuntimeError: missing/corrupt/unsupported
 | `get_user_latest_post_time` | does **not** raise; returns `PostTimeResult(ok=False, error=...)` |
 | `get_user_recent_posts` | raises → the SDK reports `isError` |
 | `search_people` / `search_pages` | raises → `isError` |
-| `send_message` | caught by `MessageService` → `SendResult(ok=False, delivery="not_sent" or "unknown", error=...)` |
+| `send_message` | caught by `MessageService` → `SendResult(ok=False, delivery="not_sent"|"rejected"|"unknown", error=...)` |
 
 ---
 
