@@ -198,10 +198,14 @@ Facebook changes its frontend regularly. When a query breaks:
 1. Re-capture with `tools/sniff.py --navigate <url> --save-templates`.
 2. That writes the fresh `doc_id`s into the account store and promotes
    `routes/templates/search_results.json` when the `variables` shape changed.
-   Do **not** hardcode a rotated `doc_id` in `routes/graphql.py`: the registry
-   value is only a bootstrap default (`BaseClient._doc_id()` prefers the
-   account store), so refreshing it must not produce a commit.
-3. Keep clients and services untouched — that separation is the point.
+   Never hardcode a rotated `doc_id` to fix your own machine: the registry value
+   is only a bootstrap default (`BaseClient._doc_id()` prefers the account
+   store), so refreshing it must not produce a commit. Bumping that default is
+   allowed **only** as a deliberate "release refresh" commit that says so.
+3. Interface parameters and templates live in `routes/` — keep clients and
+   services out of those changes. The exception is DOM-driven `send_message`:
+   Messenger selectors live in the client, so a layout change legitimately
+   touches it (§11).
 
 See `ARCHITECTURE.md` §8.6.
 

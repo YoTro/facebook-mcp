@@ -50,7 +50,7 @@ test-commits: ## validate commit messages on the current branch
 smoke: ## MCP stdio handshake + tools/list
 	$(PY) tools/smoke_mcp.py
 
-check: lint fmt-check layers test smoke ## everything CI runs (commit messages excluded)
+check: lint fmt-check layers test smoke ## main local checks (CI also runs commit messages, the credential guard and the wheel build)
 
 build: ## build sdist + wheel
 	$(PY) -m build

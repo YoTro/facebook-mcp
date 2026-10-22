@@ -63,7 +63,7 @@ automatically: `FB_PROXY` → `HTTPS_PROXY` env → macOS system proxy.
 | `get_user_recent_posts` | no | Recent posts (text, time, permalink) |
 | `search_people` | **yes** | Keyword search for people |
 | `search_pages` | **yes** | Keyword search for pages |
-| `send_message` | **yes** (+ browser) | Send a Messenger message |
+| `send_message` | **yes** (+ browser) | Send a Messenger message; the result's `delivery` says whether a retry is safe |
 
 ## Credentials: `~/.facebook-mcp/`
 
@@ -192,7 +192,7 @@ make check       # everything CI runs: lint, format, layers, tests, MCP smoke
 | `make fmt` | `ruff format` (rewrites) |
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
-| `make test` | `pytest -q` (248 tests, fully offline) |
+| `make test` | `pytest -q` (268 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

@@ -195,7 +195,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 248 tests (all offline)
+└── tests/                           # 268 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -302,9 +302,14 @@ class Transport(Protocol):
     are kept instead of dropped (required for packet capture)
 - `proxy.py` — three-tier resolution: explicit `FB_PROXY` → `HTTPS_PROXY`-style
   environment variables → macOS `scutil --proxy`.
-- `browsing.py` — `cdp_from(transport)`: structurally decides whether a
+- `browsing.py` — the `BrowserTransport` protocol (`evaluate` / `navigate` /
+  `send` / `cookies`) and `cdp_from(transport)`: structurally decides whether a
   transport can drive a browser (a `CdpTransport`, or the `.cdp` half of a
-  `HybridTransport`).
+  `HybridTransport`). Clients that drive the UI depend on this protocol and
+  import **no concrete transport class**.
+- `throttle.py` — `RateLimiter`: one instance per account
+  (`limiter_for(settings)`), shared by HTTP, CDP and the UI operations of
+  `send_message`, so mixing channels cannot double the request rate.
 - `factory.py` — `get_transport()` and `HybridTransport` (routes by
   `transport_hint`).
 
@@ -328,6 +333,12 @@ class Transport(Protocol):
     → `FB_COOKIE` → anonymous (see §5.8)
   - `require_auth()`: when logged out it **tries** to bootstrap cookies through
     `cookie_provider`, and only then raises `AuthError`
+  - `invalidate(reason)`: called after Facebook rejects the credentials. Always
+    drops `fb_dtsg` / `lsd`; a browser-backed session also clears its cookies so
+    the next `require_auth()` re-reads the live jar. A file/string jar cannot be
+    refreshed in-process, so it is kept but marked rejected: later authenticated
+    calls fail with "re-export and restart" instead of replaying a dead cookie
+  - `rejected`: why the session was last rejected (`None` when healthy)
   - `learn_from_html()`: refreshes `lsd` / `fb_dtsg` from a page
   - `from_config`: whether cookies came from configuration or the account store
     rather than the browser; this drives the protocol-first transport choice (§9.3)
@@ -398,7 +409,9 @@ layer (`base.py` only defines dataclasses).
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, …)`
   - `_parse_results()`: reads
     `data.serpResponse.results.edges[*].rendering_strategy.view_model.profile`,
-    de-duplicates, skips malformed nodes, splits Page/User by `__typename`
+    de-duplicates and skips malformed nodes; `__typename="User"` counts as a Page
+    only when it carries category metadata, so a person never shows up in
+    `search_pages` results. Unknown typenames fall back to the tab's category
   - `next_cursor()`: reads `page_info.end_cursor` (pagination hook, unused so far)
   - **does not parse the search result HTML** (results are client-rendered and
     absent from the initial HTML)
@@ -421,10 +434,24 @@ layer (`base.py` only defines dataclasses).
     (levels 1-2).
   - composer detection requires an `aria-label` matching `^Write to .+` (a
     non-empty name), which excludes the thread list's `Write to ` new-message
-    search box
-  - `_compose_and_send()`: focus → `Input.insertText` → **verify the composer
-    actually received the text** → click `Press enter to send` (fallback: Enter)
-    → **poll until the composer clears** as the delivery signal
+    search box. Only composers inside the main pane qualify, so a docked chat
+    popup can never supply the box
+  - **the recipient is verified before typing**: the thread-list fallback matches
+    the full thread id in the href (never a substring) and `_thread_id()` no
+    longer falls back to the uid after a redirect. Once a conversation is open
+    the client requires "thread id == uid" or "`Write to <name>` matches the
+    recipient's display name", otherwise it refuses to send (`nothing was
+    sent`). The label is read once more before clicking send, in case a
+    re-render swapped the box
+  - `_compose_and_send()`: focus → `Input.insertText` → verify the composer
+    actually received the text → click `Press enter to send` (fallback: Enter)
+    → poll until the composer clears
+  - **`SendResult.delivery` distinguishes three states**: `not_sent` (nothing was
+    submitted, safe to retry), `submitted` (handed to Messenger, but the web UI
+    exposes no server acknowledgement, so a retry may duplicate) and `unknown`
+    (send was clicked and the outcome cannot be observed: the composer vanished
+    or still holds text). The last two raise `SendUncertainError` instead of
+    masquerading as an ordinary failure
   - `send_via_graphql()`: a retained protocol entry point that currently raises
     `UnsupportedError` and explains why
 
@@ -667,12 +694,12 @@ TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt temp
 | Source | Condition | Result |
 |---|---|---|
 | HTTP | `404` | `NotFoundError` |
-| HTTP | `401` / `403` | `AuthError` |
+| HTTP | `401` / `403` (authenticated request) | `AuthError` (and `SessionManager.invalidate()`) |
 | HTTP | `429` | `RateLimitError` |
 | HTTP | any other `>= 400` | `HttpStatusError` |
 | Relay `errors` | contains `missing_required_variable` | `ParseError` (asks you to re-capture the template) |
 | Relay `errors` | `rate limit` while **not** authenticated (code `1675004`) | `AuthError` |
-| Relay `errors` | contains `log in` / `login` / `permission` / `checkpoint` / … | `AuthError` |
+| Relay `errors` | contains `log in` / `login` / `permission` / `checkpoint` / … | `AuthError` (and `SessionManager.invalidate()`) |
 | Relay `errors` | anything else | `ParseError` |
 | Body | not JSON (e.g. HTML after the `for (;;);` guard) | `ParseError` hinting the `doc_id` may have rotated |
 | Legacy envelope | `{"error": <code>, "errorSummary": ...}` (no `errors`) | `ParseError`; `1357031` (content no longer available) names the rotated `doc_id` |
@@ -832,13 +859,15 @@ The third fallback therefore only works for personal accounts; see
    `PROMOTED_TEMPLATES` allow-list); everything else stays in the gitignored
    `.cache/routes.json`, so dead templates (and the session ids inside them)
    never ship in the wheel.
-4. That is normally the whole job — `routes/graphql.py` needs no edit. Only bump
-   the `Route(...)` default when you want fresh installs to work before their
-   first capture.
+4. That is normally the whole job — `routes/graphql.py` needs no edit.
 5. **Restart the MCP server** so the new `doc_ids` are picked up (§5.4).
-6. Only `routes/` changes — client and service logic stay untouched. Commit the
-   captured `doc_id` into `Route(...)` only to refresh the bootstrap default for
-   fresh clones; the route table `tools/sniff.py` prints exists for that step.
+6. **The default may be refreshed, but only as a deliberate "release refresh"
+   commit** that says it is the bootstrap value for fresh installs. Fixing your
+   own machine always goes through the account store, never through the source.
+7. Interface parameters / `doc_id` / `variables` templates only touch `routes/`
+   (or the account store). **DOM-driven paths (`send_message`) are the
+   exception**: Messenger selectors live in the client, so a layout change
+   requires a client change — which is why §11 lists that path as brittle.
 
 ---
 
@@ -846,16 +875,26 @@ The third fallback therefore only works for personal accounts; see
 
 ### 9.1 The transport abstraction comes first
 
-The `Transport` protocol is the only contract; `CurlCffiTransport`,
-`CdpTransport` and `HybridTransport` all implement it. Upper-layer clients have
-no idea how a request physically travels.
+There are two contracts, not one:
+
+- `Transport` (`transport/base.py`) — HTTP-shaped requests. `CurlCffiTransport`,
+  `CdpTransport` and `HybridTransport` implement it, and business clients have no
+  idea how a request physically travels.
+- `BrowserTransport` (`transport/browsing.py`) — the capability to drive a real
+  UI (`evaluate` / `navigate` / `send` / `cookies`). Paths that must operate a
+  browser (e.g. `send_message`) depend only on this protocol, obtained through
+  `cdp_from()`, and import **no concrete transport class** (they catch
+  `TransportError` rather than `CdpError`).
 
 ### 9.2 Routes are separate from clients
 
 Interface definitions (`doc_id`, endpoints, `variables` templates) are **data**
-that changes with every Facebook release; clients are **logic**. A release only
-touches `routes/`. The `account.json -> doc_ids` override in §5.4 goes one step
-further: when only the `doc_id` rotates, not even `routes/` has to change. See
+that changes with every Facebook release; clients are **logic**. Changes to
+**interface parameters and templates** only touch `routes/`, and the
+`account.json -> doc_ids` override in §5.4 goes one step further: when only the
+`doc_id` rotates, not even `routes/` has to change. The **exception** is the
+DOM-driven `send_message`: its selectors live in the client, so a Messenger
+layout change requires a client change (§11 already lists it as brittle). See
 §8.6.
 
 ### 9.3 Protocol-first transport selection
@@ -871,8 +910,17 @@ further: when only the `doc_id` rotates, not even `routes/` has to change. See
 
 ### 9.4 Session lifecycle is its own layer
 
-Cookie/token loading, validation, refresh and browser bootstrapping all live in
-`SessionManager`, so no client has to deal with login state.
+Cookie/token loading, browser bootstrapping and post-rejection refresh live in
+`SessionManager`, so no client has to deal with login state. Two boundaries worth
+stating:
+
+- **validation is passive**: `is_authenticated` only checks that `c_user` / `xs`
+  exist and cannot tell whether they expired. The real signal comes from the
+  server (HTTP 401/403 or a Relay auth error), which the client reports to
+  `invalidate()`; the next call then re-bootstraps or fails explicitly.
+- **only refreshable things are refreshed**: `fb_dtsg` / `lsd` are re-learned
+  from a page and browser cookies are re-read; a file/string jar cannot be
+  refreshed in-process and must be re-exported with a restart.
 
 ### 9.5 Services are use cases; clients are capabilities
 
@@ -891,7 +939,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (248), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (268), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -932,18 +980,20 @@ layer only forwards, it contains no business logic.
 ### M5 details
 
 - `clients/message_client.py`: recipient resolution, thread navigation (with
-  fallbacks), input verification, send, delivery signal
-- `services/message_service.py`: exceptions → `SendResult(ok=False, error=...)`
+  fallbacks), conversation verification, input verification, send, delivery state
+- `services/message_service.py`: exceptions → `SendResult(ok=False, delivery=..., error=...)`
 - Evidence and alternatives in §8.3; `send_via_graphql()` is a retained entry
   point that currently raises `UnsupportedError`
 
 ### M6 details
 
-- Tests: 248 across 15 files (including a CDP integration test against a mock DevTools server)
+- Tests: 268 across 16 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
-- `Makefile`: `make check` is locally equivalent to CI; `make hooks` installs the commit-msg hook
+- `Makefile`: `make check` runs the main local checks (lint / fmt / layers / test /
+  smoke); CI additionally runs the commit-message convention, the credential-leak
+  guard and the wheel build/install; `make hooks` installs the commit-msg hook
 - `CONTRIBUTING.md` + `.gitmessage` + `LICENSE` (MIT)
 - Install: `pip install -e ".[dev]"` works; not published to PyPI yet
 
@@ -953,14 +1003,22 @@ layer only forwards, it contains no business logic.
 
 - **Anti-abuse controls**: Facebook enforces strict rate limits and behavioural
   detection on bulk search/messaging. Throttle (`min_request_interval`) and avoid
-  hammering from brand-new accounts.
+  hammering from brand-new accounts. The interval is enforced per account by
+  `transport/throttle.py`, shared by HTTP, CDP and the UI steps of messaging, so
+  switching channel cannot bypass it.
 - **Frontend churn**: `doc_id`, `variables` templates and HTML structure all
   change. `doc_id` rotation is absorbed by the `account.json` override layer (no
   source change when only it moves); everything else iterates through
   `tools/sniff.py` + `routes/` (§8.6).
 - **Fragile send path**: `send_message` depends on Messenger's DOM
-  (`contenteditable`, `aria-label="Press enter to send"`). Layout changes cause a
-  `ParseError` and require updating the selectors.
+  (`contenteditable`, `aria-label="Press enter to send"`, the `Write to <name>`
+  label). Layout changes cause a `ParseError` and require updating the selectors
+  in the client — which is why §8.6/§9.2 scope "only `routes/` changes" to
+  interface parameters and templates. The recipient is verified before typing,
+  and the client refuses to send when it cannot read the name.
+- **Delivery is not provable**: the web UI exposes no server acknowledgement, so
+  `delivery="submitted"` means handed over, not received; `unknown` must be
+  checked in the conversation before retrying.
 - **Compliance**: authorized accounts only. Marketing messages must comply with
   Facebook's platform policies and anti-spam law (CAN-SPAM, GDPR, …).
 

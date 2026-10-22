@@ -141,7 +141,8 @@ facebook-mcp/
 │   │   ├── http.py                  #   CurlCffiTransport
 │   │   ├── cdp.py                   #   CdpTransport(WebSocket 直连 DevTools)
 │   │   ├── proxy.py                 #   显式 → 环境变量 → macOS 系统代理解析
-│   │   ├── browsing.py              #   cdp_from():识别"能开浏览器"的传输
+│   │   ├── browsing.py              #   BrowserTransport 协议 + cdp_from()
+│   │   ├── throttle.py              #   RateLimiter:每账号一个,HTTP/CDP/UI 共享
 │   │   └── factory.py               #   get_transport() + HybridTransport
 │   │
 │   ├── session/                     # L2 会话层
@@ -179,7 +180,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 248 项测试(全部离线)
+└── tests/                           # 268 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -279,8 +280,12 @@ class Transport(Protocol):
   - `cookies()` / `evaluate()` / `navigate()` / `send()` / `drain_events()`
   - **事件缓冲**:等待命令回复期间收到的 CDP 事件不丢弃(抓包必需)
 - `proxy.py` —— 三级代理解析:显式 `FB_PROXY` → `HTTPS_PROXY` 等环境变量 → macOS `scutil --proxy`。
-- `browsing.py` —— `cdp_from(transport)`:结构化判定传输是否具备浏览器能力
+- `browsing.py` —— `BrowserTransport` 协议(`evaluate` / `navigate` / `send` /
+  `cookies`)与 `cdp_from(transport)`:结构化判定传输是否具备浏览器能力
   (直接 `CdpTransport`,或 `HybridTransport` 的 `.cdp` 半边)。
+  驱动 UI 的 client 只依赖这个协议,**不 import 任何具体传输类**。
+- `throttle.py` —— `RateLimiter`:每个账号一个实例(`limiter_for(settings)`),
+  HTTP、CDP 与 `send_message` 的 UI 操作共享同一最小间隔,混用通道不会翻倍请求速率。
 - `factory.py` —— `get_transport()` 与 `HybridTransport`(按 `transport_hint` 分流)。
 
 > **隐式契约**:`base.py` 的 `_DEFAULT_HEADERS` 固定携带
@@ -299,6 +304,11 @@ class Transport(Protocol):
   - 装载优先级:`FB_COOKIE_FILE` → `~/.facebook-mcp/accounts/<account>/cookies.txt`
     → `FB_COOKIE` → 匿名(详见 §5.8)
   - `require_auth()`:未登录时**尝试**通过 `cookie_provider` 从浏览器补齐,再失败才抛 `AuthError`
+  - `invalidate(reason)`:Facebook 拒绝凭据后调用。总是丢弃 `fb_dtsg` / `lsd`;
+    浏览器来源的会话同时清空 cookie,下次 `require_auth()` 重新从浏览器取;
+    文件/字符串来源的 jar 无法在进程内刷新,保留但标记为 rejected,
+    后续鉴权直接失败并提示重新导出 + 重启,而不是拿死 cookie 反复重试
+  - `rejected`:最近一次被拒绝的原因(`None` 表示正常)
   - `learn_from_html()`:从页面刷新 `lsd` / `fb_dtsg`
   - `from_config`:cookie 是否来自配置或账户库(而非浏览器),决定是否走纯协议(见 §9.3)
 
@@ -357,7 +367,9 @@ class Transport(Protocol):
 - `search_client.py` —— `search(query, category, limit)`:
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, ...)`
   - `_parse_results()`:读 `data.serpResponse.results.edges[*].rendering_strategy.view_model.profile`,
-    去重、跳过畸形节点、按 `__typename` 区分 Page/User
+    去重、跳过畸形节点;`__typename="User"` 只有在带 category 元数据时才算 Page,
+    否则一律算 User(因此个人账号不会出现在 `search_pages` 结果里),
+    未知 `__typename` 才回退到当前标签页的默认类别
   - `next_cursor()`:读取 `page_info.end_cursor`(分页预留)
   - **不解析搜索结果页面 HTML**(结果由客户端渲染,初始 HTML 中没有)
 - `message_client.py` —— `send(recipient, text)`:
@@ -366,16 +378,25 @@ class Transport(Protocol):
     (从未聊过的对象必须走第三级;按钮需用真实鼠标事件 `Input.dispatchMouseEvent`,
     JS `.click()` 触发不到 React handler)
   - **Page 身份下第三级不可用**:Facebook 不给 Page actor 渲染 profile 的
-    `Message` 按钮(Page 不能主动给陌生人发起会话)。判定方式:导出 cookie
-    判断依据是 `i_user` cookie:**实时 `Network.getCookies` 非空时以浏览器为准**
-    (浏览器是权威,快照陈旧也不会误判);只有实时读取失败或返回空时才退回导出快照
-    (`SessionState.acting_as_page`)。
+    `Message` 按钮(Page 不能主动给陌生人发起会话)。判定依据是 `i_user` cookie:
+    **实时 `Network.getCookies` 非空时以浏览器为准**(快照陈旧也不会误判);
+    只有实时读取失败或返回空时才退回导出快照(`SessionState.acting_as_page`)。
     此时第二级失败就直接报 `UnsupportedError` 并说明原因,不再白等 35s
     轮询一个永不出现的按钮。已有的会话仍可回复(第一、二级不受影响)
   - 输入框识别要求 `aria-label` 匹配 `^Write to .+`(名字非空),
     以排除会话列表里那个 `Write to ` 的新建会话搜索框
-  - `_compose_and_send()`:聚焦 → `Input.insertText` → **校验输入框已接收文本**
-    → 点 `Press enter to send`(回退 Enter)→ **轮询输入框清空**作为送达判据
+  - **发送前校验收件人**:输入框只取主面板里(排除 docked chat)带 `Write to <name>`
+    标签的那个;会话列表回退按 URL 里的完整线程 id 精确匹配,不用子串;
+    `_thread_id()` 不再在跳转后拿 uid 兜底。打开会话后要求
+    「线程 id == uid」或「`Write to <name>` 与收件人显示名一致」,
+    否则直接拒发(`nothing was sent`);同一标签会在点发送前再读一次,
+    防止期间被 re-render 换成别人的会话
+  - `_compose_and_send()`:聚焦 → `Input.insertText` → 校验输入框已接收文本
+    → 点 `Press enter to send`(回退 Enter)→ 轮询输入框清空
+  - **`SendResult.delivery` 区分三种状态**:`not_sent`(什么都没提交,可安全重试)、
+    `submitted`(已交给 Messenger,但 Web UI 拿不到服务端回执,重试可能重复)、
+    `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本)。
+    后两种对应 `SendUncertainError`,不再伪装成普通失败
   - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
 
 ### 5.6 L4 services
@@ -431,6 +452,11 @@ class Transport(Protocol):
 | 1 | `FB_COOKIE_FILE` | 显式路径,最高优先级(容器/临时调试) |
 | 2 | `~/.facebook-mcp/accounts/<FB_ACCOUNT>/cookies.txt` | **默认**,隔离且可持久 |
 | 3 | `FB_COOKIE` | 内联字符串;会出现在 `ps` / shell 历史中,仅作兜底 |
+
+前两项属于「全局凭据」,只对 `FB_ACCOUNT` 指定账号有效:
+`build_settings(account="work")` 会**丢弃** `FB_COOKIE` / `FB_COOKIE_FILE`,
+让 `work` 只能用自己的账户库(否则 cookie 文件优先级更高,跨账号调用会静默换成
+另一个身份,账号目录隔离形同虚设)。
 
 无任何来源时以匿名运行(仅公开页可用)。
 
@@ -564,13 +590,15 @@ server.send_message(recipient="exampleuser", text="...")
       → resolve_recipient(): username → uid(需要 ProfileClient)
       → cdp_from(transport)                                # 必须是浏览器通道
       → navigate  https://www.facebook.com/messages/t/<uid>/
-      → 等 composer;失败则点击会话列表中的该会话
+      → 等 composer;失败则精确匹配线程 id 点击会话列表行
       → 仍失败:Page 身份直接报错(Page 无法主动发起会话,§5.5)
       → 否则打开主页点 "Message"
+      → 校验会话:线程 id == uid,或 "Write to <name>" == 收件人显示名
+        (不匹配则拒发,nothing was sent)
       → Input.insertText → 校验输入框已接收
       → 点 "Press enter to send"(回退:Enter 键)
       → 轮询输入框是否清空
-  → SendResult(ok=True, thread_id=...)
+  → SendResult(ok=True, delivery="submitted", thread_id=...)
 ```
 
 > 这里没有 GraphQL:发送由 Facebook 的 service worker 发起,详情见 §10「M5」与 §8.3。
@@ -589,7 +617,8 @@ FacebookError                    core/exceptions.py —— 所有项目异常的
 │   ├── HttpStatusError          非 2xx(4xx/5xx,不含 404/403/401/429)
 │   ├── ParseError               响应结构变化、GraphQL errors、模板过期
 │   └── CdpError                 transport/cdp.py —— DevTools 协议调用失败
-└── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
+├── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
+└── SendUncertainError           已点击发送但结果无法观测 —— 调用方不得盲目重试
 
 TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/类别不支持
 ```
@@ -599,12 +628,12 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | 来源 | 条件 | 结果 |
 |---|---|---|
 | HTTP | `404` | `NotFoundError` |
-| HTTP | `401` / `403` | `AuthError` |
+| HTTP | `401` / `403`(鉴权请求) | `AuthError`(并调用 `SessionManager.invalidate()`) |
 | HTTP | `429` | `RateLimitError` |
 | HTTP | 其他 `>= 400` | `HttpStatusError` |
 | Relay `errors` | 含 `missing_required_variable` | `ParseError`(提示重新抓模板) |
 | Relay `errors` | **未登录**时的 `rate limit`(code `1675004`) | `AuthError` |
-| Relay `errors` | 含 `log in` / `login` / `permission` / `checkpoint` 等 | `AuthError` |
+| Relay `errors` | 含 `log in` / `login` / `permission` / `checkpoint` 等 | `AuthError`(并调用 `SessionManager.invalidate()`) |
 | Relay `errors` | 其他 | `ParseError` |
 | 响应体 | 不是 JSON(如 `for (;;);` 后仍是 HTML) | `ParseError`,提示 `doc_id` 可能已轮换 |
 | 旧式信封 | `{"error": <code>, "errorSummary": ...}`(无 `errors`) | `ParseError`;`1357031`(content no longer available)会点名 `doc_id` 已轮换 |
@@ -752,9 +781,12 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
    `.cache/routes.json`,避免死模板(及其中的会话 id)进 wheel。
 4. 正常情况下到此为止 —— 不需要改 `routes/graphql.py`。
    **重启 MCP server** 让新的 `doc_ids` 生效(§5.4)。
-5. 只有想把“新装即用”的 bootstrap 默认值推上去时,才把抓到的 `doc_id` 提交进
-   `Route(...)`。`tools/sniff.py` 打印的 route 表就是给这一步的,平时不必抄进源码。
-6. 仅动 `routes/`,不改 client / service 逻辑。
+5. **默认值可以更新,但只能作为一次有意的「release refresh」提交**:提交信息
+   必须说明这是 bootstrap 默认值(让新装用户在首次抓包前可用),而不是修好自己
+   机器的手段。修问题的路径永远是账户库,不是改源码。
+6. 接口参数 / `doc_id` / `variables` 模板的变化只动 `routes/`(或账户库);
+   **DOM 驱动的路径(`send_message`)例外**:Messenger 选择器写在 client 里,
+   布局变化需要改 client,这正是 §11 把它列为脆弱点的原因。
 
 ---
 
@@ -762,14 +794,22 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
 
 ### 9.1 传输层抽象是第一公民
 
-`Transport` 协议是唯一契约;`CurlCffiTransport` / `CdpTransport` / `HybridTransport`
-都实现它。上层 client 完全不感知请求物理上如何发出。
+分层契约有两个,而不是一个:
+
+- `Transport`(`transport/base.py`)—— HTTP 形态的请求。`CurlCffiTransport` /
+  `CdpTransport` / `HybridTransport` 都实现它,业务 client 不感知请求物理上如何发出。
+- `BrowserTransport`(`transport/browsing.py`)—— 驱动真实 UI 的能力
+  (`evaluate` / `navigate` / `send` / `cookies`)。`send_message` 这类必须操作浏览器的
+  路径只依赖这个协议,通过 `cdp_from()` 获取,**不 import 任何具体传输类**
+  (异常也按 `TransportError` 捕获,而不是 `CdpError`)。
 
 ### 9.2 routes 与 clients 分离
 
 接口定义(`doc_id`、端点、`variables` 模板)是**数据**,随 Facebook 改版频繁变化;
-client 是**逻辑**。改版只改 `routes/`,业务代码不动。§5.4 的 `account.json → doc_ids`
-覆盖层更进一步:仅 `doc_id` 轮换时连 `routes/` 都不用改。见 §8.6。
+client 是**逻辑**。**接口参数与模板**的变化只改 `routes/`,业务代码不动;
+§5.4 的 `account.json → doc_ids` 覆盖层更进一步,仅 `doc_id` 轮换时连 `routes/` 都不用改。
+**例外**是 DOM 驱动的 `send_message`:它的选择器内嵌在 client 里,Messenger 布局
+变化时必然要改 client(§11 已把它列为已知脆弱点)。见 §8.6。
 
 ### 9.3 协议优先的传输选择
 
@@ -784,8 +824,14 @@ client 是**逻辑**。改版只改 `routes/`,业务代码不动。§5.4 的 `ac
 
 ### 9.4 会话生命周期独立成层
 
-cookie / token 的装载、校验、刷新、浏览器引导集中在 `SessionManager`,
-避免每个 client 各自处理登录态。
+cookie / token 的装载、浏览器引导、失效后刷新集中在 `SessionManager`,
+避免每个 client 各自处理登录态。两点边界要说清:
+
+- **校验是被动的**:`is_authenticated` 只能看 `c_user` / `xs` 是否存在,
+  判断不了是否过期;真正的失效信号来自服务端(401/403 或 Relay auth error),
+  由 client 反馈给 `invalidate()`,下一次调用才会重新引导或明确失败。
+- **只能刷新可刷新的东西**:`fb_dtsg` / `lsd` 从页面重学,浏览器来源的 cookie
+  重新读取;文件/字符串来源的 jar 无法在进程内刷新,必须重新导出并重启。
 
 ### 9.5 服务层 = 用例,客户端层 = 能力
 
@@ -804,7 +850,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(248 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(268 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -843,17 +889,19 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M5 交付明细
 
-- `clients/message_client.py`:收件人解析、线程导航(含回退)、输入校验、发送、送达判据
+- `clients/message_client.py`:收件人解析、线程导航(含回退)、会话校验、输入校验、发送、送达状态
 - `services/message_service.py`:异常 → `SendResult(ok=False, error=...)`
 - 逆向证据与备选方案见 §8.3;`send_via_graphql()` 为保留入口,当前显式 `UnsupportedError`
 
 ### M6 交付明细
 
-- 测试:248 项,覆盖 15 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:268 项,覆盖 16 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
-- `Makefile`:`make check` 本地等价于 CI;`make hooks` 安装 commit-msg 钩子
+- `Makefile`:`make check` 跑本地主检查(lint / fmt / layers / test / smoke);
+  CI 另外还跑 commit message 规范、凭据泄漏防护和 wheel 打包安装验证;
+  `make hooks` 安装 commit-msg 钩子
 - `CONTRIBUTING.md` + `.gitmessage` + `LICENSE`(MIT)
 - 安装:`pip install -e ".[dev]"` 可用;未发布到 PyPI
 
@@ -862,12 +910,18 @@ MCP 层只做转发,不含业务逻辑。
 ## 11. 风险与合规
 
 - **风控**:Facebook 对批量搜索/私信有严格频率限制与行为检测;
-  需限速(`min_request_interval`)、避免高频新账号操作。
+  需限速(`min_request_interval`)、避免高频新账号操作。该间隔由
+  `transport/throttle.py` 按账号统一执行,HTTP、CDP 与发消息的 UI 操作
+  共享同一预算,换通道不会绕过限速。
 - **改版**:`doc_id`、`variables` 模板、HTML 结构都会变化。`doc_id` 已被
   `account.json` 覆盖层吸收(仅它轮换时不动源码),其余通过 `tools/sniff.py`
   + `routes/` 快速迭代(§8.6)。
 - **发送路径脆弱性**:`send_message` 依赖 Messenger DOM(`contenteditable`、
-  `aria-label="Press enter to send"`)。布局变化会导致 `ParseError`,需要更新选择器。
+  `aria-label="Press enter to send"`、`Write to <name>` 标签)。布局变化会导致
+  `ParseError`,需要更新 client 里的选择器;这也是 §8.6/§9.2 把「改版只改 routes/」
+  限定在接口参数与模板上的原因。发送前还会校验收件人,读不到名字时宁可拒发。
+- **送达不可证**:Web UI 不暴露服务端回执,`delivery="submitted"` 只代表已提交,
+  不代表对方收到;`unknown` 必须人工确认会话后才能重试。
 - **合规**:仅用于授权账号;发送营销消息需遵守 Facebook 平台政策与
   反垃圾法规(如 CAN-SPAM、GDPR)。
 

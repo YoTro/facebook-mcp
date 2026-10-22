@@ -138,6 +138,41 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   replies arrive (as a real MCP client does) and prints the server's stderr on
   every failure, not just when `initialize` goes missing.
 
+- `account="work"` inherited the global `FB_COOKIE` / `FB_COOKIE_FILE` from
+  `FB_ACCOUNT`, and a cookie file outranks the account store — a cross-account
+  call could act as the other identity. Global credentials are now dropped for
+  any other account, with a warning.
+- `send_message` typed into "the first composer labelled `Write to …`", which is
+  also what docked chat popups render, and matched thread rows with a substring
+  id. It now ignores docked chats, requires the exact thread id, and refuses to
+  compose unless the thread id equals the recipient uid or the composer's
+  `Write to <name>` label matches the recipient's display name. The label is
+  re-read before clicking send.
+- `SendResult` claimed success when the composer merely cleared. It now carries
+  `delivery`: `not_sent` (safe to retry), `submitted` (handed over; a retry may
+  duplicate) or `unknown` (send clicked, outcome unobservable, raised as
+  `SendUncertainError`).
+- `search_pages` returned people: `_category_for()` fell back to the tab's
+  category for `__typename="User"`, so a person surfaced in the pages tab was
+  labelled PAGES. Users now count as pages only when they carry category
+  metadata.
+- A rejected session was never invalidated: an expired jar counted as logged in
+  and every call replayed it. `SessionManager.invalidate()` drops the CSRF
+  tokens and, for browser-backed sessions, the cookies so the next call
+  re-bootstraps; an exported jar fails fast with "re-export and restart".
+- `min_request_interval` only applied to curl_cffi, so CDP-executed GraphQL and
+  the `send_message` UI steps bypassed it. A per-account `RateLimiter` is now
+  shared by HTTP, CDP and UI operations.
+- `get_user_latest_post_time` returned `ok=True` with a `null` time when no post
+  carried a parsed `creation_time`; it now fails and says the payload shape
+  probably changed.
+- Documentation reconciled with the code: the doc_id "bootstrap default" rule is
+  identical in CONTRIBUTING and §8.6, "only `routes/` changes" is scoped to
+  interface parameters/templates (DOM selectors live in the client), §9.1
+  documents the `BrowserTransport` capability protocol instead of claiming
+  `Transport` is the only contract, and `make check` is described as the main
+  local checks rather than "equivalent to CI".
+
 ### Planned
 
 - Capture the Messenger send mutation (service-worker / Lightspeed) and replace
