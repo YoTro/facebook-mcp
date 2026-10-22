@@ -294,14 +294,25 @@ class MessageClient(BaseClient):
     def _send_over_protocol(self, uid: str, text: str) -> SendResult | None:
         """Try the WebSocket path; ``None`` means "fall back to the UI".
 
-        A rejected send is *not* a fallback case: the server saw the message and
-        refused it, so repeating it through the UI would only duplicate that.
+        On a rejection the UI is worth one attempt in ``auto`` mode: the server
+        said the message was *not* sent, so there is nothing to duplicate, and the
+        UI distinguishes "this thread needs the DOM path" from "this recipient
+        does not accept messages at all". In ``lightspeed`` mode the rejection is
+        final.
         """
         assert self._lightspeed is not None
         try:
             ack = self._lightspeed.send(uid, text)
-        except SendRejectedError:
-            raise
+        except SendRejectedError as exc:
+            mode = self._settings.message_transport if self._settings else "auto"
+            if mode == "lightspeed":
+                raise
+            logger.info(
+                "gateway rejected the send (%s); trying the UI path to tell a "
+                "thread restriction from a closed inbox",
+                exc,
+            )
+            return None
         except LightspeedError as exc:
             if self._settings and self._settings.message_transport == "lightspeed":
                 raise

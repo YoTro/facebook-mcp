@@ -826,3 +826,39 @@ def test_enter_fallback_is_not_pressed_when_the_composer_vanished() -> None:
 
     assert cdp.key_events == [], "Enter was pressed with no composer"
     assert cdp.sent is False
+
+
+# --- protocol rejection is disambiguated, not silently retried ----------
+
+
+class _RejectingSender:
+    def send(self, uid: str, text: str):
+        from facebook_mcp.core.exceptions import SendRejectedError
+
+        raise SendRejectedError("Messenger refused the message")
+
+
+def test_protocol_rejection_falls_back_to_the_ui_in_auto_mode() -> None:
+    """A refusal means nothing was sent, so the UI can safely disambiguate."""
+    cdp = FakeCdp(composer_on_thread=True)
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = MessageClient(cdp, session, Settings(message_transport="auto"))
+    client._lightspeed = _RejectingSender()  # type: ignore[assignment]
+
+    result = client.send("200000000000001", "hello")
+
+    assert result.ok is True
+    assert cdp.sent is True, "the UI path was not tried after a protocol refusal"
+
+
+def test_protocol_rejection_is_final_in_lightspeed_mode() -> None:
+    from facebook_mcp.core.exceptions import SendRejectedError
+
+    cdp = FakeCdp(composer_on_thread=True)
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = MessageClient(cdp, session, Settings(message_transport="lightspeed"))
+    client._lightspeed = _RejectingSender()  # type: ignore[assignment]
+
+    with pytest.raises(SendRejectedError):
+        client.send("200000000000001", "hello")
+    assert cdp.sent is False

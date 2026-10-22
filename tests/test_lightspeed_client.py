@@ -73,15 +73,29 @@ def test_send_delivers_and_returns_message_id() -> None:
     assert fake.closed is True
 
 
-def test_send_performs_the_thread_warmup_first() -> None:
-    sender, fake = _sender(ACCEPT)
-    sender.send("1234567890", "hello")
-
+def _labels(fake: _FakeWs) -> list[str]:
     labels: list[str] = []
     for frame in fake.sent:
         body = json.loads(ls.split_frame(frame).json()["payload"])
         labels.extend(task["label"] for task in body["tasks"])
-    assert labels == ["54", "117", "767", "207", "207", "46", "21"]
+    return labels
+
+
+def test_send_does_not_warm_up_by_default() -> None:
+    """A public page conversation accepts a bare task 46 (measured)."""
+    sender, fake = _sender(ACCEPT)
+    sender.send("1234567890", "hello")
+    assert _labels(fake) == ["46", "21"]
+
+
+def test_warmup_is_available_for_threads_that_need_it() -> None:
+    fake = _FakeWs(ACCEPT)
+    session = SessionManager(Settings(cookie="c_user=42; xs=tok", cookie_file=None))
+    sender = LightspeedSender(Settings(), session, warmup=True)
+    sender._connect = lambda uid, cookies: fake  # type: ignore[method-assign]
+
+    sender.send("1234567890", "hello")
+    assert _labels(fake) == ["54", "117", "767", "207", "207", "46", "21"]
 
 
 def test_send_raises_on_refusal() -> None:

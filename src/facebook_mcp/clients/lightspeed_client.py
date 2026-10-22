@@ -76,7 +76,13 @@ def gateway_url(uid: str, *, version: int = 5) -> str:
 
 
 class LightspeedSender:
-    """Sends a text message over the Messenger sync WebSocket."""
+    """Sends a text message over the Messenger sync WebSocket.
+
+    ``warmup`` is off by default: a public page conversation accepts a bare task
+    46 (measured). Some thread types — a page's own "get started" thread, for
+    one — were only accepted after the thread-context fetches, so the option
+    exists for those, but it is not a general requirement.
+    """
 
     def __init__(
         self,
@@ -84,12 +90,14 @@ class LightspeedSender:
         session: SessionManager,
         *,
         version_id: str = DEFAULT_VERSION_ID,
+        warmup: bool = False,
         connect_timeout: float = 15.0,
         reply_timeout: float = 15.0,
     ) -> None:
         self._settings = settings
         self._session = session
         self._version_id = version_id
+        self._warmup = warmup
         self._connect_timeout = connect_timeout
         self._reply_timeout = reply_timeout
 
@@ -130,12 +138,13 @@ class LightspeedSender:
             raise LightspeedError(f"cannot open the Messenger gateway: {exc}") from exc
 
     def _warm_up_and_send(self, ws: Any, uid: str, thread_key: str, text: str) -> tuple[str, int]:
-        for index, tasks in enumerate(lightspeed.warmup_task_batches(thread_key, uid)):
-            envelope = lightspeed.build_envelope(
-                tasks, request_id=10 + index, version_id=self._version_id
-            )
-            ws.send_binary(lightspeed.encode_send(envelope, 10 + index))
-            time.sleep(0.03)
+        if self._warmup:
+            for index, tasks in enumerate(lightspeed.warmup_task_batches(thread_key, uid)):
+                envelope = lightspeed.build_envelope(
+                    tasks, request_id=10 + index, version_id=self._version_id
+                )
+                ws.send_binary(lightspeed.encode_send(envelope, 10 + index))
+                time.sleep(0.03)
 
         otid = str(random.getrandbits(63))
         request_id = random.randint(1, 60000)
@@ -168,9 +177,15 @@ class LightspeedSender:
 
             ack = parse_ack(text, otid)
             if ack.rejected:
+                # Deliberately does not guess *why*: "Couldn't send" is what the
+                # server also answers when the recipient has messaging disabled,
+                # when the thread type does not accept a protocol send, and when
+                # context is missing. The caller can disambiguate with the UI.
                 raise SendRejectedError(
                     'Messenger refused the message ("Couldn\'t send"); it did not '
-                    "reach the recipient"
+                    "reach the recipient. The recipient may not accept messages "
+                    "(a Page with messaging turned off), or this thread needs the "
+                    "UI path"
                 )
             if ack.message_id is None:
                 raise LightspeedError(

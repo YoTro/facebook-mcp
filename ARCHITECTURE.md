@@ -206,7 +206,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 324 项测试(全部离线)
+└── tests/                           # 327 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -800,21 +800,25 @@ body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
     task 46 = 发消息(thread_id/otid/text/…),task 21 = 标记已读
 ```
 
-**已跑通(无需浏览器)**:发送前必须先发一组**线程上下文查询**,否则服务器一律回
-`markOptimisticMessageFailed / "Couldn't send."`。它们是普通 task,可用 thread_key
-自建(不需要会话订阅):
+**已跑通(无需浏览器)**:消息以 task 46 直接发送,服务器回
+`replaceOptimsiticMessage` + 真实 `mid.$…`。**不需要任何预热**(实测:同一线程
+不发热身也直接通过)。
 
-| label | queue | payload |
-|---|---|---|
-| 54 | `insert_persistent_menu_ctas` | `{"thread_key": <thread>}` |
-| 117 | `insert_persistent_menu_items` | `{"thread_key": <thread>}` |
-| 767 | `fetch_custom_thread_commands` | `{"thread_key": <thread>}` |
-| 207 | `cpq_v2` | `{"contact_id": <thread>}` + `{"contact_id": <自己 uid>}` |
+> ⚠️ **一次自我纠正**:早前我根据"某线程无预热被拒、有预热才通过"得出"必须先拉取
+> 线程上下文"的结论,并写进了文档。后续对照实验证伪了它 —— 换一个公共主页线程,
+> 无预热直接 `ACCEPTED`。真实差异是**线程相关**的:某些线程(例如主页自己的
+> "Get started" 会话)在裸发送时被拒,补上上下文查询才通过;而普通公共主页会话
+> 不需要。因此预热是 `warmup=True` 的可选项,不是普遍前置条件。
 
-之后发 label 46,服务器回 `replaceOptimsiticMessage` + 真实 `mid.$…`。
+**`Couldn't send` 是模糊结论**,至少三种原因会得到同一回执:
 
-关于 `version_id`:跨线程、跨会话实测都是同一个值 `39529440880004510`,说明它是
-**客户端构建标识而非队列状态**,可以直接作为常量。
+1. 对方(公共主页)**关闭了私信**;
+2. 该**线程类型**不接受这种协议发送(需要 UI 路径);
+3. 缺少线程上下文(可用 `warmup=True` 试探)。
+
+客户端不猜测:拒绝时原样上报 `SendRejectedError`。`auto` 模式下会再用 UI 路径试一次
+——服务器已明确表示"未发送",不存在重复风险,而 UI 能区分"线程受限"与"收件人拒收";
+`lightspeed` 模式下直接失败。
 
 实现:`clients/lightspeed_client.py`(连接 → 预热 → 发送 → 解析回执),
 帧编解码在 `transport/lightspeed.py`。`send_message` 现在**协议优先**:
@@ -934,7 +938,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(324 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(327 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -979,7 +983,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:324 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:327 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

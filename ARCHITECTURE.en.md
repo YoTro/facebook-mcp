@@ -224,7 +224,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 324 tests (all offline)
+└── tests/                           # 327 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -885,24 +885,29 @@ body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
     task 46 = send message (thread_id/otid/text/…), task 21 = mark read
 ```
 
-**Working, no browser required**: a send must be preceded by a set of
-**thread-context queries**, otherwise the server always answers
-`markOptimisticMessageFailed / "Couldn't send."`. They are ordinary tasks that can
-be built from the thread key alone (no session subscription needed):
+**Working, no browser required**: task 46 goes out directly and the server
+answers `replaceOptimsiticMessage` with a real `mid.$…`. **No warm-up is
+required** (measured: the same thread accepts a bare send).
 
-| label | queue | payload |
-|---|---|---|
-| 54 | `insert_persistent_menu_ctas` | `{"thread_key": <thread>}` |
-| 117 | `insert_persistent_menu_items` | `{"thread_key": <thread>}` |
-| 767 | `fetch_custom_thread_commands` | `{"thread_key": <thread>}` |
-| 207 | `cpq_v2` | `{"contact_id": <thread>}` + `{"contact_id": <own uid>}` |
+> ⚠️ **Self-correction**: an earlier version of this document claimed the
+> thread-context fetches were a prerequisite, based on one thread that rejected a
+> bare send and accepted one after them. A control experiment disproved it —
+> another public page conversation accepted a bare send immediately. The real
+> difference is **thread-specific**: some threads (a page's own "Get started"
+> conversation, for instance) reject a bare send and need the context queries,
+> while an ordinary public page thread does not. Warm-up is therefore the
+> `warmup=True` option, not a general precondition.
 
-Then task 46, and the server replies `replaceOptimsiticMessage` with a real
-`mid.$…`.
+**`Couldn't send` is an ambiguous verdict.** At least three causes produce it:
 
-On `version_id`: it was identical across threads and sessions
-(`39529440880004510`), so it identifies the client build rather than any queue —
-it can be a constant.
+1. the recipient (a public page) has **messaging turned off**;
+2. the **thread type** does not accept a protocol send (it needs the UI path);
+3. thread context is missing (probe with `warmup=True`).
+
+The client does not guess: a refusal is reported verbatim as `SendRejectedError`.
+In `auto` mode it then tries the UI once — the server already stated the message
+was *not* sent, so nothing can be duplicated, and the UI distinguishes "restricted
+thread" from "closed inbox". In `lightspeed` mode the refusal is final.
 
 Implementation: `clients/lightspeed_client.py` (connect → warm-up → send → parse the
 verdict), with the codec in `transport/lightspeed.py`. `send_message` is now
@@ -1038,7 +1043,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (324), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (327), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1086,7 +1091,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 324 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 327 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

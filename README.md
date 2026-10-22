@@ -28,10 +28,14 @@ All five tools work against the live site.
 ### How `send_message` works
 
 Messages travel over `wss://gateway.facebook.com/ws/lightspeed` (JSON tasks in a
-16-byte binary frame) — not over HTTP and not via a service worker. The protocol
-is implemented: connect with the account's cookies, post the thread-context
-queries, then task 46; the server answers `replaceOptimsiticMessage` with a real
-`message_id`.
+16-byte binary frame) — not over HTTP and not via a service worker. Connect with
+the account's cookies, send task 46, and the server answers
+`replaceOptimsiticMessage` with a real `message_id`.
+
+A `Couldn't send` verdict is ambiguous: the recipient may have messaging turned
+off (common for pages), the thread type may need the DOM path, or the thread may
+need extra context. The client reports it as-is; `auto` mode then tries the UI
+once to tell those apart, since the server has already stated nothing was sent.
 
 ```bash
 FB_MESSAGE_TRANSPORT=lightspeed   # protocol only (no browser, no fallback)
@@ -202,7 +206,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (324 tests, fully offline) |
+| `make test` | `pytest -q` (327 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

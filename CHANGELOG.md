@@ -12,10 +12,10 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 ### Added
 
 - **`send_message` works without a browser.** Messenger's send is reproducible
-  over `wss://gateway.facebook.com/ws/lightspeed`: after posting four
-  thread-context tasks (labels 54/117/767/207 — built from the thread key, no
-  subscription needed) and task 46, the server answers
-  `replaceOptimsiticMessage` with a real `mid.$…`. `clients/lightspeed_client.py`
+  over `wss://gateway.facebook.com/ws/lightspeed`: task 46 alone makes the server
+  answer `replaceOptimsiticMessage` with a real `mid.$…`. (Warm-up tasks are
+  available as an option, but a control experiment showed they are not required —
+  see the corrections below.) `clients/lightspeed_client.py`
   implements the sequence; `send_message` is protocol-first with a UI fallback,
   selectable via `FB_MESSAGE_TRANSPORT`.
 - `transport/lightspeed.py`: encoder/decoder for Messenger's sync frames. The
@@ -54,6 +54,17 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **A wrong conclusion about the protocol was corrected.** This changelog and
+  both architecture documents claimed a send must be preceded by thread-context
+  fetches, based on a single thread where a bare send was refused and a warm-up
+  made it work. A control experiment (same thread type, no warm-up) was accepted,
+  so the requirement is thread-specific, not general. Warm-up is now opt-in and
+  the documentation states the ambiguity of `Couldn't send`, which is also what a
+  page with messaging disabled returns.
+- **`Couldn't send` is now treated as ambiguous rather than diagnostic.** The
+  message and the docs no longer assert that a refusal means missing warm-up; they
+  list the three known causes and let `auto` mode use the UI path to tell them
+  apart (safe: the server already said nothing was sent).
 - **A replayed send could have been reported as `not_sent` after delivery.** The
   gateway nests its verdict in a JSON string, so the acceptance marker arrives
   with escaped quotes; matching raw text missed it while the message had in fact
