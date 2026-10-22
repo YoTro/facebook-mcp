@@ -40,6 +40,16 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **Multi-line messages could hide a failed send.** The rejection needle
+  collapsed whitespace while the bubble's `innerText` kept its line breaks, so
+  sending "Hello\nExample User" never matched its own bubble and a "Couldn't
+  send" label was reported as `submitted`. Both sides are collapsed now, and the
+  same normalisation is used for the "did the composer accept the text" check.
+- **An unreadable composer passed recipient verification.** `_assert_composer_target`
+  only failed on a *mismatch*, so a label that could no longer be read counted as
+  verified. With a known recipient it now refuses. The Enter fallback also checks
+  that the composer still exists first — previously a vanished box let three key
+  events land on whatever had focus.
 - **`search_pages` returned nothing.** Facebook types page results as
   `__typename="User"` (measured live: every result of `search/pages` is a
   `User` with no category fields), so the "never report a User as a Page"

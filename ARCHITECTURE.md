@@ -205,7 +205,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 301 项测试(全部离线)
+└── tests/                           # 304 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -392,9 +392,10 @@ class Transport(Protocol):
 - `search_client.py` —— `search(query, category, limit)`:
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, ...)`
   - `_parse_results()`:读 `data.serpResponse.results.edges[*].rendering_strategy.view_model.profile`,
-    去重、跳过畸形节点;`__typename="User"` 只有在带 category 元数据时才算 Page,
-    否则一律算 User(因此个人账号不会出现在 `search_pages` 结果里),
-    未知 `__typename` 才回退到当前标签页的默认类别
+    去重、跳过畸形节点。**类别以搜索标签页为准**:Facebook 在 pages 标签页里
+    把页面结果标成 `__typename="User"` 且不带 category 字段(2026-10 实测:12/12),
+    所以只有显式 `Page`/`PageProfile` 会覆盖标签页类别 —— 这既能保证页面不出现在
+    `search_people` 里,又不会把整个 `search_pages` 过滤成空
   - `next_cursor()`:读取 `page_info.end_cursor`(分页预留)
   - **不解析搜索结果页面 HTML**(结果由客户端渲染,初始 HTML 中没有)
 - `message_client.py` —— `send(recipient, text)`:
@@ -428,8 +429,10 @@ class Transport(Protocol):
     `MessageService` 依次捕获 `SendUncertainError` / `SendRejectedError` / 其他
     `FacebookError`,点击前的失败绝不会被标成结果未知
   - **拒绝检测是 best-effort**:失败气泡中的 "Couldn't send" 是 UI 文案(已收录中/英/西)。
-    只统计**叶子节点整段文本精确等于**标记的节点,并把范围限制在包含本次发送文本的气泡里 ——
-    早期版本在整条气泡正文里做子串匹配,发送"修好了 Couldn't send 问题"会被误判为拒绝。
+    只统计**叶子节点整段文本精确等于**标记的节点,并把范围限制在包含本次发送文本的气泡里;
+    比较前两侧都做空白折叠(`innerText` 保留换行,而 needle 是单行前缀,不折叠会漏报
+    多行消息的失败)。早期版本在整条气泡正文里做子串匹配,发送"修好了 Couldn't send 问题"
+    会被误判为拒绝。
     发送前后各数一次,只有**新增**才算拒绝,避免历史失败污染后续发送;
     同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
   - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
@@ -894,7 +897,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(301 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(304 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -939,7 +942,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:301 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:304 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

@@ -223,7 +223,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 301 tests (all offline)
+└── tests/                           # 304 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -437,9 +437,11 @@ layer (`base.py` only defines dataclasses).
   - `build_search_variables()` → `_graphql(SEARCH_RESULTS, …)`
   - `_parse_results()`: reads
     `data.serpResponse.results.edges[*].rendering_strategy.view_model.profile`,
-    de-duplicates and skips malformed nodes; `__typename="User"` counts as a Page
-    only when it carries category metadata, so a person never shows up in
-    `search_pages` results. Unknown typenames fall back to the tab's category
+    de-duplicates and skips malformed nodes. **The search tab decides the
+    category**: Facebook labels page results `__typename="User"` with no category
+    fields in the pages tab (measured 2026-10: 12 of 12), so only an explicit
+    `Page`/`PageProfile` overrides the tab — which keeps a page out of
+    `search_people` without filtering the whole `search_pages` result to empty
   - `next_cursor()`: reads `page_info.end_cursor` (pagination hook, unused so far)
   - **does not parse the search result HTML** (results are client-rendered and
     absent from the initial HTML)
@@ -488,8 +490,11 @@ layer (`base.py` only defines dataclasses).
   - **rejection detection is best-effort**: the "Couldn't send" marker is UI text
     (en/zh/es are recognised). Only *leaf* nodes whose whole trimmed text equals a
     marker are counted, and they must sit in the bubble that holds the text we
-    just sent — an earlier version searched article bodies for the substring, so
-    a normal message like "fixed the Couldn't send issue" was reported rejected.
+    just sent. Both sides are whitespace-collapsed before comparing (`innerText`
+    keeps line breaks while the needle is a single-line prefix, so a multi-line
+    message would otherwise be missed). An earlier version searched article bodies
+    for the substring, so a normal message like "fixed the Couldn't send issue"
+    was reported rejected.
     Failed bubbles are counted before and after, and only a *new* one counts, so
     an older failure cannot taint a later send. The same bubble's accessibility
     label still says "Message sent", which is why the text cannot be used to
@@ -990,7 +995,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (301), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (304), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1038,7 +1043,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 301 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 304 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
