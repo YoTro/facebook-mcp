@@ -104,7 +104,7 @@
 
 ### 依赖注入(与代码一致)
 
-跨层协作者全部**构造函数注入**,没有模块级单例;`services/factory.py` 是唯一装配点:
+跨层协作者全部**构造函数注入**,`services/factory.py` 是唯一装配点:
 
 ```
 Services(settings)                       # get_services(account) 按账号缓存整张图
@@ -119,7 +119,13 @@ Services(settings)                       # get_services(account) 按账号缓存
 ```
 
 因此测试可以替换任意一层(`FakeCdp`、`_RecordingTransport`、stub `ProfileClient`),
-client 之间也从不互相 `new`;`BaseClient` 只持有 `transport` / `session` / `settings` 三个依赖。
+client 之间也从不互相 `new`;`BaseClient` 只持有 `transport` / `session` / `settings`
+三个依赖(外加一个它从不自己构造的可选服务引用)。
+
+唯一的例外是**限速器**:`transport/throttle.py` 维护一个进程级
+`limiter_for(settings)` 注册表(按 `(account, interval)` 键),因为 HTTP、CDP 与
+发消息的 UI 步骤必须共享同一预算。它在构造时被注入到每个 transport 和 client,
+共享状态因此不会渗进业务代码。
 
 ---
 
@@ -199,7 +205,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 273 项测试(全部离线)
+└── tests/                           # 301 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -416,11 +422,15 @@ class Transport(Protocol):
     `submitted`(已交给 Messenger,但 Web UI 拿不到服务端回执,重试可能重复)、
     `rejected`(Messenger 把消息标成未发出,`SendRejectedError`,可安全重试)、
     `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本,`SendUncertainError`)。
-    只有后两种 `ok=False`,`submitted` 是成功返回。
+    **只有 `submitted` 是 `ok=True`**;其余三种都是 `ok=False`,区别在于能否安全重试。
+    点击之后发生的任何非 `SendRejectedError`/`SendUncertainError` 异常(例如 CDP 读取失败)
+    都会被归为 `unknown` —— 绝不能降级成 `not_sent`,否则会诱导重复发送。
     `MessageService` 依次捕获 `SendUncertainError` / `SendRejectedError` / 其他
     `FacebookError`,点击前的失败绝不会被标成结果未知
-  - **拒绝检测是 best-effort**:失败气泡中的 "Couldn't send" 是 UI 文案(已收录中/英/西),
-    发送前后各数一次失败气泡,只有**新增**才算拒绝,避免历史失败污染后续发送;
+  - **拒绝检测是 best-effort**:失败气泡中的 "Couldn't send" 是 UI 文案(已收录中/英/西)。
+    只统计**叶子节点整段文本精确等于**标记的节点,并把范围限制在包含本次发送文本的气泡里 ——
+    早期版本在整条气泡正文里做子串匹配,发送"修好了 Couldn't send 问题"会被误判为拒绝。
+    发送前后各数一次,只有**新增**才算拒绝,避免历史失败污染后续发送;
     同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
   - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
 
@@ -647,6 +657,7 @@ FacebookError                    基类,定义在 core/exceptions.py
 │   └── CdpError                 **定义在 transport/cdp.py**(唯一不在 core),
 │                                 DevTools 协议调用失败
 ├── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
+├── SendRejectedError            Messenger 明确标记为未发出("Couldn't send")—— 可安全重试
 └── SendUncertainError           已点击发送但结果无法观测 —— 调用方不得盲目重试
 
 TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/类别不支持
@@ -883,7 +894,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(273 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(301 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -928,7 +939,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:273 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:301 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

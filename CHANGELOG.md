@@ -40,6 +40,52 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **`search_pages` returned nothing.** Facebook types page results as
+  `__typename="User"` (measured live: every result of `search/pages` is a
+  `User` with no category fields), so the "never report a User as a Page"
+  heuristic classified them as people and the page search filtered them all out.
+  The tab is the authority again; only an explicit `Page`/`PageProfile` overrides
+  it, which still keeps a page out of a people search.
+- **A message sent after the click could be reported `not_sent`.** Any
+  `FacebookError` raised after the send was clicked (a lost CDP reply, for
+  instance) was mapped to `not_sent` — "safe to retry" — which invites a
+  duplicate. Post-click failures are now `SendUncertainError` → `unknown`.
+- **Ordinary message text could trigger "rejected".** Failure detection searched
+  article bodies for "Couldn't send", so sending "fixed the Couldn't send issue"
+  counted as a failed send (and `rejected` claims a retry is safe — a duplicate
+  risk in the other direction). Only leaf nodes whose whole text equals a marker,
+  inside the bubble holding our text, are counted now.
+- **Recipient checks could still mis-deliver.** `_same_name` accepted any prefix,
+  so "Example User" matched "Example User Two"; prefix matching now requires an
+  explicit truncation marker. The composer is also re-verified immediately before
+  the send click, not only before typing, so the pacing wait is no longer a window
+  for a docked chat to steal the box.
+- **A foreign account could borrow the default browser.** `build_settings()`
+  dropped the global cookies for another account but kept the global `cdp_url`,
+  so `auto` mode bootstrapped that browser's credentials for the wrong account.
+  A foreign account now has no browser unless its own `account.json` binds one,
+  and an unbound account fails with an actionable message.
+- **CDP auth failures bypassed session invalidation.** The transport raises
+  `AuthError` inside `request()`, so `BaseClient`'s post-return status check never
+  ran and `session.rejected` stayed empty while every later call repeated the 403.
+- **Anonymous retries could carry a cookie.** The anonymous jar was cleared once
+  before the retry loop; a retryable response that set a cookie leaked it into the
+  retry. The session is now resolved (and cleared) per attempt.
+- **Packet capture could run forever.** `drain_events()` waited for an idle gap
+  only, so a continuous event stream kept `sniff --seconds N` alive past its
+  budget. It now honours an absolute deadline.
+- **`export_cookies --home` chose the output directory but not the browser.** The
+  account lookup used `FB_HOME`, so a custom root could export the wrong account's
+  jar. `build_settings(account, home=...)` now carries the override (`sniff` got
+  `--home` too).
+- **The layering checker missed `__init__.py`.** Package modules were treated as
+  ordinary modules when resolving relative imports, so an upward import injected
+  into `core/__init__.py` still reported zero violations.
+- **The document-sync checker ignored unnumbered headings.** It split on every
+  heading and then dropped the unnumbered ones, so a whole section could move
+  between parents (the real drift between §3 and §4) or disappear unnoticed. It
+  now compares the full outline and counts unnumbered bodies with their parent.
+
 - **`--account` selected only the storage folder, not the browser.**
   `tools/export_cookies.py` and `tools/sniff.py` used `get_settings()`, so they
   read `FB_CDP_URL` and could export account A's cookie jar into account B's

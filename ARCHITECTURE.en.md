@@ -119,6 +119,34 @@ All usernames, page names and ids in this repository are placeholders
 
 ---
 
+### Dependency injection (as implemented)
+
+Every cross-layer collaborator is **constructor-injected**, and
+`services/factory.py` is the only assembly point:
+
+```
+Services(settings)                       # get_services(account) caches one graph per account
+  ├─ get_transport(settings) ──────────→ CurlCffiTransport / CdpTransport / HybridTransport
+  ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
+  ├─ ProfileClient(transport, session, settings)
+  ├─ SearchClient(transport, session, settings)
+  ├─ MessageClient(transport, session, settings, profile_client)   # reuses username resolution
+  ├─ PostService(profile_client)
+  ├─ SearchService(search_client)
+  └─ MessageService(message_client)
+```
+
+Tests can therefore replace any single layer (`FakeCdp`, `_RecordingTransport`, a stub
+`ProfileClient`), clients never instantiate each other, and `BaseClient` holds only
+`transport` / `session` / `settings` (plus an optional service lookups it never
+constructs itself).
+
+The one deliberate exception is the **rate limiter**: `transport/throttle.py` keeps a
+process-wide `limiter_for(settings)` registry keyed by `(account, interval)`, because
+HTTP, CDP and the UI steps of a send must share one budget. It is injected into every
+transport and client at construction, so the shared state never leaks into business
+code.
+
 ## 4. Directory layout (actual)
 
 ```
@@ -195,7 +223,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 273 tests (all offline)
+└── tests/                           # 301 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -217,27 +245,6 @@ facebook-mcp/
 ```
 
 ---
-
-### Dependency injection (as implemented)
-
-Every cross-layer collaborator is **constructor-injected**; there are no module-level
-singletons, and `services/factory.py` is the only assembly point:
-
-```
-Services(settings)                       # get_services(account) caches one graph per account
-  ├─ get_transport(settings) ──────────→ CurlCffiTransport / CdpTransport / HybridTransport
-  ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
-  ├─ ProfileClient(transport, session, settings)
-  ├─ SearchClient(transport, session, settings)
-  ├─ MessageClient(transport, session, settings, profile_client)   # reuses username resolution
-  ├─ PostService(profile_client)
-  ├─ SearchService(search_client)
-  └─ MessageService(message_client)
-```
-
-Tests can therefore replace any single layer (`FakeCdp`, `_RecordingTransport`, a stub
-`ProfileClient`), clients never instantiate each other, and `BaseClient` holds only
-`transport` / `session` / `settings`.
 
 ## 5. Module responsibilities
 
@@ -471,16 +478,22 @@ layer (`base.py` only defines dataclasses).
     submitted, safe to retry), `submitted` (handed to Messenger, but the web UI
     exposes no server acknowledgement, so a retry may duplicate), `rejected`
     (Messenger marked it unsent — `SendRejectedError`, safe to retry) and
-    `unknown` (send clicked, outcome unobservable — `SendUncertainError`). Only
-    the last two are `ok=False`; `submitted` is a **success**. `MessageService`
-    maps `SendUncertainError` → `unknown`, `SendRejectedError` → `rejected`, any
-    other `FacebookError` → `not_sent`, so nothing before the click can be
-    reported as unknown.
+    `unknown` (send clicked, outcome unobservable — `SendUncertainError`).
+    **Only `submitted` is `ok=True`**; the other three are `ok=False`, and what
+    differs is whether a retry is safe. `MessageService` maps
+    `SendUncertainError` → `unknown`, `SendRejectedError` → `rejected`, and every
+    other `FacebookError` → `not_sent` — but the client only lets *pre-click*
+    failures escape as plain `FacebookError`, so an error after the click is
+    always `unknown`.
   - **rejection detection is best-effort**: the "Couldn't send" marker is UI text
-    (en/zh/es are recognised). Failed bubbles are counted before and after, and
-    only a *new* one counts, so an older failure cannot taint a later send. The
-    same bubble's accessibility label still says "Message sent", which is why the
-    text cannot be used to confirm delivery.
+    (en/zh/es are recognised). Only *leaf* nodes whose whole trimmed text equals a
+    marker are counted, and they must sit in the bubble that holds the text we
+    just sent — an earlier version searched article bodies for the substring, so
+    a normal message like "fixed the Couldn't send issue" was reported rejected.
+    Failed bubbles are counted before and after, and only a *new* one counts, so
+    an older failure cannot taint a later send. The same bubble's accessibility
+    label still says "Message sent", which is why the text cannot be used to
+    confirm delivery.
   - `send_via_graphql()`: a retained protocol entry point that currently raises
     `UnsupportedError` and explains why
 
@@ -721,6 +734,7 @@ FacebookError                    base class, defined in core/exceptions.py
 │   └── CdpError                 **defined in transport/cdp.py** (the only one
 │                                 outside core) — a DevTools protocol call failed
 ├── UnsupportedError             transport/account lacks it (no browser, Page chat)
+├── SendRejectedError            Messenger marked it unsent ("Couldn't send") — retry is safe
 └── SendUncertainError           send clicked, outcome unknown — do not blind-retry
 
 TemplateError (routes/templates) — RuntimeError: missing/corrupt/unsupported
@@ -976,7 +990,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (273), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (301), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1024,7 +1038,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 273 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 301 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
@@ -1055,7 +1069,11 @@ layer only forwards, it contains no business logic.
   and the client refuses to send when it cannot read the name.
 - **Delivery is not provable**: the web UI exposes no server acknowledgement, so
   `delivery="submitted"` means handed over, not received; `unknown` must be
-  checked in the conversation before retrying.
+  checked in the conversation before retrying. Measured behaviour: Facebook
+  clears the composer first and only then stamps the bubble "Couldn't send"
+  (and that bubble's accessibility label still says "Message sent"), so
+  `rejected` relies on matching UI text — best-effort, and it breaks with a
+  language change or a redesign.
 - **Compliance**: authorized accounts only. Marketing messages must comply with
   Facebook's platform policies and anti-spam law (CAN-SPAM, GDPR, …).
 
