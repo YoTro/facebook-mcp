@@ -156,9 +156,20 @@ class MessageClient(BaseClient):
             )
         return cdp
 
+    def _pace(self) -> None:
+        """Respect ``min_request_interval`` for UI-driven operations too.
+
+        Navigating Messenger and clicking send issue the same kind of traffic as
+        a GraphQL call, so they draw from the account's shared budget instead of
+        bypassing the limiter the HTTP transport uses.
+        """
+        if self._limiter is not None:
+            self._limiter.wait()
+
     def _open_thread(self, cdp: CdpTransport, uid: str) -> str:
         """Open a conversation, falling back as far as the profile page."""
         logger.info("opening messenger thread %s", uid)
+        self._pace()
         try:
             cdp.navigate(f"{MESSENGER_BASE}{uid}/", timeout=45.0)
         except CdpError as exc:
@@ -219,6 +230,7 @@ class MessageClient(BaseClient):
 
     def _start_from_profile(self, cdp: CdpTransport, uid: str) -> bool:
         """Open the profile and click its "Message" button."""
+        self._pace()
         try:
             cdp.navigate(f"{PROFILE_BASE}{uid}", timeout=45.0)
         except CdpError as exc:
@@ -359,6 +371,8 @@ class MessageClient(BaseClient):
                 f"composer did not accept the text (got {typed!r}); aborting before send"
             )
 
+        # The click (or Enter) is what puts the message on the wire.
+        self._pace()
         if not self._click_send(cdp):
             self._press_enter(cdp)
 

@@ -12,6 +12,7 @@ from ..core.exceptions import TransportError
 from ..core.logger import get_logger
 from .base import HttpRequest, HttpResponse, Transport
 from .proxy import proxy_mapping, resolve_proxy
+from .throttle import limiter_for
 
 logger = get_logger(__name__)
 
@@ -27,8 +28,7 @@ class CurlCffiTransport(Transport):
         self._impersonate = settings.impersonate
         self._timeout = settings.request_timeout
         self._max_retries = settings.max_retries
-        self._min_interval = settings.min_request_interval
-        self._last_request_started = 0.0
+        self._limiter = limiter_for(settings)
 
         self._headers = {"Accept-Language": "en-US,en;q=0.9"}
         if settings.user_agent:
@@ -59,7 +59,7 @@ class CurlCffiTransport(Transport):
         for attempt in range(self._max_retries):
             # Throttle every attempt, not just the first: a retry is still a
             # request and must respect the configured minimum interval.
-            self._throttle()
+            self._limiter.wait()
             try:
                 resp = session.request(
                     req.method,
@@ -155,12 +155,3 @@ class CurlCffiTransport(Transport):
         if header.isdigit():
             return float(header)
         return None  # HTTP-date form: fall back to exponential backoff
-
-    def _throttle(self) -> None:
-        """Enforce a minimum interval between request starts."""
-        if self._min_interval <= 0:
-            return
-        elapsed = time.monotonic() - self._last_request_started
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_started = time.monotonic()

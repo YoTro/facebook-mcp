@@ -33,6 +33,7 @@ from ..core.exceptions import (
 )
 from ..core.logger import get_logger
 from .base import HttpRequest, HttpResponse, Transport
+from .throttle import limiter_for
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,9 @@ class CdpTransport(Transport):
         # Events seen while waiting for a command reply are buffered here so
         # nothing is lost for callers that care about them (packet capture).
         self._events: deque[dict[str, Any]] = deque(maxlen=10_000)
+        # Same per-account budget as the HTTP transport: a GraphQL call run
+        # inside the browser hits the same limits as one sent with curl_cffi.
+        self._limiter = limiter_for(settings)
 
     @property
     def name(self) -> str:
@@ -81,6 +85,7 @@ class CdpTransport(Transport):
 
     def request(self, req: HttpRequest) -> HttpResponse:
         """Perform ``req`` from inside the page and return the response."""
+        self._limiter.wait()
         result = self.evaluate(_fetch_expression(req), await_promise=True)
         if not isinstance(result, dict):
             raise CdpError("unexpected fetch result from page")

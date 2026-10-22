@@ -196,3 +196,80 @@ def test_omit_requests_do_not_pollute_each_other(server: str) -> None:
         assert "Cookie" not in resp.text
     finally:
         t.close()
+
+
+# --- shared pacing -------------------------------------------------------
+
+
+def test_limiter_is_shared_by_every_channel_of_an_account() -> None:
+    from facebook_mcp.transport.throttle import limiter_for
+
+    settings = Settings(account="work", min_request_interval=0.2)
+    same = limiter_for(settings.model_copy())
+    assert limiter_for(settings) is same
+
+    other = Settings(account="other", min_request_interval=0.2)
+    assert limiter_for(other) is not same
+
+
+def test_cdp_requests_are_throttled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GraphQL executed inside the browser must respect the same interval."""
+    from facebook_mcp.transport.cdp import CdpTransport
+
+    transport = CdpTransport(Settings(min_request_interval=0.2))
+    calls: list[str] = []
+
+    def fake_evaluate(expression: str, **kwargs: object) -> dict[str, object]:
+        calls.append(expression)
+        return {"status": 200, "text": "ok", "url": "https://www.facebook.com/x"}
+
+    monkeypatch.setattr(transport, "evaluate", fake_evaluate)
+
+    start = time.monotonic()
+    transport.request(HttpRequest("GET", "https://www.facebook.com/x"))
+    transport.request(HttpRequest("GET", "https://www.facebook.com/x"))
+    elapsed = time.monotonic() - start
+
+    assert len(calls) == 2
+    assert elapsed >= 0.15, f"CDP bypassed the limiter (elapsed {elapsed:.2f}s)"
+
+
+def test_message_ui_operations_are_paced() -> None:
+    """Navigating and sending draw from the account's limiter too."""
+    from facebook_mcp.clients.message_client import MessageClient
+    from facebook_mcp.session.manager import SessionManager
+
+    waits: list[int] = []
+    client = MessageClient(_NoopTransport(), SessionManager(Settings()), Settings())
+    client._limiter = type("L", (), {"wait": lambda self: waits.append(1)})()  # type: ignore[assignment]
+
+    thread_id = client._open_thread(_FakeCdp(), "1234567890")
+    assert thread_id == "1234567890"
+    assert waits, "UI navigation did not consult the limiter"
+
+
+class _NoopTransport:
+    name = "noop"
+
+    def request(self, req):  # type: ignore[no-untyped-def]
+        raise AssertionError("not used")
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeCdp:
+    name = "fake-cdp"
+
+    def navigate(self, url: str, timeout: float | None = None) -> None:
+        self.url = url
+
+    def evaluate(self, expression: str, **kwargs: object) -> object:
+        if "location.href" in expression:
+            return self.url
+        if "return !!(composer || sendButton)" in expression:
+            return True
+        return None
+
+    def cookies(self, url: str | None = None) -> dict[str, str]:
+        return {}
