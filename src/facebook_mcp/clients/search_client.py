@@ -103,28 +103,19 @@ class SearchClient(BaseClient):
 
 
 def _category_for(profile: dict[str, Any], *, fallback: SearchCategory) -> SearchCategory:
-    """Infer the entity kind from ``__typename`` / page-specific fields.
+    """Entity kind of a search hit.
 
-    A ``User`` without any page metadata is a person — in *every* tab, so it is
-    never reported as a Page. Facebook also returns real pages with
-    ``__typename="User"`` in some surfaces; those always carry category fields.
-    Unknown typenames keep the tab's ``fallback``.
+    The *tab* is the authority. Facebook types page results as
+    ``__typename="User"`` in the pages tab (measured 2026-10: every result of
+    ``search/pages`` is a ``User`` with no category fields), so inferring "person"
+    from that typename drops the entire page search. Only an explicit
+    ``Page``/``PageProfile`` overrides the tab, which keeps a page out of a
+    *people* result list without ever inventing a page.
     """
     typename = str(profile.get("__typename") or "")
     if typename in ("Page", "PageProfile"):
         return SearchCategory.PAGES
-    if typename == "User":
-        return SearchCategory.PAGES if _has_page_metadata(profile) else SearchCategory.PEOPLE
     return fallback
-
-
-def _has_page_metadata(profile: dict[str, Any]) -> bool:
-    """Whether a ``User``-typed node carries page-only fields."""
-    for key in ("category_name", "category", "short_category_name"):
-        value = profile.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
 
 
 def _subtitle(profile: dict[str, Any]) -> str | None:

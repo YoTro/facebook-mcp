@@ -89,9 +89,43 @@ def test_template_does_not_leak_between_calls() -> None:
 
 def test_parse_results_pages(payload: dict[str, Any]) -> None:
     results = SearchClient._parse_results(payload, SearchCategory.PAGES)
-    # Page-typed nodes are kept; User-typed people are dropped even though
-    # Facebook returns them in this tab; duplicates and malformed nodes skipped.
-    assert [r.id for r in results] == ["987654321"]
+    # The pages tab is the authority: Facebook types page results as
+    # __typename="User" (measured live), so nothing valid may be dropped here.
+    # Duplicates and malformed nodes are still skipped.
+    assert [r.id for r in results] == ["100000000000010", "987654321", "555000111"]
+    assert all(r.category is SearchCategory.PAGES for r in results)
+
+
+def test_pages_tab_keeps_user_typed_results_without_category_fields() -> None:
+    """The live shape of a page search: __typename="User", no category fields.
+
+    Treating that as "a person" is what made search_pages return zero results.
+    """
+    payload = {
+        "data": {
+            "serpResponse": {
+                "results": {
+                    "edges": [
+                        {
+                            "rendering_strategy": {
+                                "view_model": {
+                                    "profile": {
+                                        "id": "61594429025499",
+                                        "name": "Example Pest Control",
+                                        "__typename": "User",
+                                        "is_verified": False,
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    results = SearchClient._parse_results(payload, SearchCategory.PAGES)
+    assert [r.id for r in results] == ["61594429025499"]
+    assert results[0].category is SearchCategory.PAGES
 
 
 def test_user_typed_page_in_page_search_is_kept() -> None:
