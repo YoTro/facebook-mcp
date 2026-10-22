@@ -11,9 +11,9 @@
                 "profile": {
                   "__typename": "User",
                   "id": "100000000000010",
-                  "name": "Pest control",
-                  "url": "https://www.facebook.com/rpmpests",
-                  "profile_url": "https://www.facebook.com/rpmpests",
+                  "name": "Example Pest Control",
+                  "url": "https://www.facebook.com/example-pest",
+                  "profile_url": "https://www.facebook.com/example-pest",
                   "is_verified": false,
                   "profile_picture": {
                     "uri": "https://scontent.example/fb/100000000000010.jpg"
@@ -28,8 +28,8 @@
                 "profile": {
                   "__typename": "Page",
                   "id": "987654321",
-                  "name": "Perth Pest Control",
-                  "url": "https://www.facebook.com/perthpestcontrol",
+                  "name": "Example Business",
+                  "url": "https://www.facebook.com/example-business",
                   "is_verified": true,
                   "category_name": "Pest Control Service",
                   "profile_picture": { "uri": "https://scontent.example/fb/987654321.jpg" }
@@ -43,8 +43,8 @@
                 "profile": {
                   "__typename": "User",
                   "id": "100000000000010",
-                  "name": "Pest control (duplicate)",
-                  "url": "https://www.facebook.com/rpmpests"
+                  "name": "Example Pest Control (duplicate)",
+                  "url": "https://www.facebook.com/example-pest"
                 }
               }
             }
@@ -65,8 +65,8 @@
                 "profile": {
                   "__typename": "User",
                   "id": "555000111",
-                  "name": "Pest Control News Ltd",
-                  "url": "https://www.facebook.com/PestControlNewsLtd",
+                  "name": "Example News",
+                  "url": "https://www.facebook.com/example-news",
                   "is_verified": false
                 }
               }

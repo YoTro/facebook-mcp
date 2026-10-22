@@ -49,6 +49,8 @@ class FakeCdp:
         thread_row: bool = True,
         message_button: bool = True,
         live_cookies: dict[str, str] | None = None,
+        draft: str = "",
+        vanish_after_send: bool = False,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
     ) -> None:
         self.composer_on_thread = composer_on_thread
@@ -60,6 +62,8 @@ class FakeCdp:
         self.thread_row = thread_row
         self.message_button = message_button
         self.live_cookies = live_cookies or {}
+        self.draft = draft
+        self.vanish_after_send = vanish_after_send
         self.url = url
 
         self.composer_open = False
@@ -81,6 +85,7 @@ class FakeCdp:
         if "/messages/t/" in url:
             self.url = url
             self.composer_open = self.composer_on_thread
+            self.composer_text = self.draft
         elif "profile.php" in url:
             self.url = url
             self.composer_open = False
@@ -107,6 +112,8 @@ class FakeCdp:
             if self.clears_after_send:
                 self.composer_text = ""
                 self.sent = True
+                if self.vanish_after_send:
+                    self.composer_open = False
             return {}
         if method == "Input.dispatchMouseEvent":
             if params.get("type") == "mousePressed":
@@ -139,9 +146,11 @@ class FakeCdp:
             if self.clears_after_send:
                 self.composer_text = ""
                 self.sent = True
+                if self.vanish_after_send:
+                    self.composer_open = False
             return True
         if "composer.innerText" in expression:
-            return self.composer_text if self.composer_open else ""
+            return self.composer_text if self.composer_open else None
         return None
 
 
@@ -474,3 +483,30 @@ def test_live_page_overrides_personal_snapshot() -> None:
     )
     with pytest.raises(UnsupportedError, match="acting as a Page"):
         _client(cdp).send("100000000000003", "hi")
+
+
+# --- the composer is a shared, stateful input ---------------------------
+
+
+def test_existing_draft_is_never_concatenated() -> None:
+    """insertText appends at the caret: an unsent draft would be sent too."""
+    cdp = FakeCdp(composer_on_thread=True, draft="old draft: ")
+    with pytest.raises(FacebookError, match="unsent draft"):
+        _client(cdp).send("200000000000001", "hello")
+
+    assert cdp.inserted == []
+    assert cdp.sent is False
+    assert cdp.composer_text == "old draft: "
+
+
+def test_whitespace_only_draft_is_not_a_draft() -> None:
+    cdp = FakeCdp(composer_on_thread=True, draft="   \n")
+    result = _client(cdp).send("200000000000001", "hello")
+    assert result.ok is True
+
+
+def test_vanished_composer_is_not_success() -> None:
+    """A re-render removes the composer too; that is not proof of delivery."""
+    cdp = FakeCdp(composer_on_thread=True, vanish_after_send=True)
+    with pytest.raises(ParseError, match="disappeared after sending"):
+        _client(cdp).send("200000000000001", "hello")

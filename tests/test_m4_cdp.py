@@ -310,3 +310,51 @@ def test_services_wires_cookie_provider() -> None:
         assert services.session._cookie_provider is not None
     finally:
         services.close()
+
+
+# --- anonymous routes must omit browser credentials ---------------------
+#
+# fetch() attaches the browser cookie jar regardless of headers, so a route that
+# must look logged-out needs credentials: "omit" rather than a missing header.
+
+
+def test_fetch_expression_respects_omit_credentials() -> None:
+    expr = _fetch_expression(HttpRequest("GET", "https://www.facebook.com/x"))
+    assert '"credentials": "include"' in expr
+
+
+def test_fetch_expression_can_omit_credentials() -> None:
+    expr = _fetch_expression(HttpRequest("GET", "https://www.facebook.com/x", credentials="omit"))
+    assert '"credentials": "omit"' in expr
+
+
+def test_anonymous_route_omits_credentials_end_to_end() -> None:
+    """PROFILE_PAGE is anonymous, so the CDP request must omit credentials."""
+    from facebook_mcp.clients.profile_client import ProfileClient
+    from facebook_mcp.session.manager import SessionManager
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.requests: list[HttpRequest] = []
+
+        @property
+        def name(self) -> str:
+            return "recorder"
+
+        def request(self, req: HttpRequest) -> HttpResponse:
+            self.requests.append(req)
+            return HttpResponse(200, req.url, {}, "<html></html>", b"")
+
+        def close(self) -> None:
+            pass
+
+    transport = _Recorder()
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = ProfileClient(transport, session, Settings())  # type: ignore[arg-type]
+    try:
+        client.fetch_timeline("exampleuser")
+    except ValueError:
+        pass  # the stub body has no profile payload; the request is what matters
+
+    assert transport.requests[-1].credentials == "omit"
+    assert "Cookie" not in transport.requests[-1].headers

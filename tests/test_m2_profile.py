@@ -252,3 +252,24 @@ def test_authenticated_routes_still_send_cookies() -> None:
 
     client._request(Route(op="x", method="GET", path="/x"))
     assert transport.requests[-1].headers.get("Cookie") == "c_user=1; xs=2"
+
+
+# --- curl's HttpOnly marker -------------------------------------------------
+
+
+def test_httponly_cookies_are_parsed(tmp_path: Path) -> None:
+    """curl writes HttpOnly entries as ``#HttpOnly_<domain>``, not comments."""
+    f = tmp_path / "cookies.txt"
+    f.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.facebook.com\tTRUE\t/\tTRUE\t0\tc_user\t456\n"
+        "#HttpOnly_.facebook.com\tTRUE\t/\tTRUE\t0\txs\ttoken\n"
+        "# this one is a real comment\n"
+        ".facebook.com\tTRUE\t/\tFALSE\t0\tdatr\td\n",
+        encoding="utf-8",
+    )
+    state = extractor.from_cookie_file(f)
+    assert state.cookies["c_user"] == "456"
+    assert state.cookies["xs"] == "token"
+    assert state.cookies["datr"] == "d"
+    assert state.is_authenticated is True

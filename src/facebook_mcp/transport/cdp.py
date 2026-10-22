@@ -339,7 +339,7 @@ def _fetch_expression(req: HttpRequest) -> str:
     init: dict[str, Any] = {
         "method": req.method.upper(),
         "headers": headers,
-        "credentials": "include",
+        "credentials": req.credentials,
         "redirect": "follow",
     }
     if body is not None:

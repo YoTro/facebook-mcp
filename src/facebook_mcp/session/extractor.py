@@ -11,6 +11,9 @@ from .state import SessionState
 
 logger = get_logger(__name__)
 
+# Header of the Netscape cookie format used for HttpOnly entries.
+HTTPONLY_PREFIX = "#HttpOnly_"
+
 # Token markers published by Facebook's ServerJS payload.
 _LSD_RE = re.compile(r'"LSD",\[\],\{"token":"([^"]+)"')
 _DTSG_RE = re.compile(r'"DTSGInitialData",\[\],\{"token":"([^"]+)"')
@@ -43,7 +46,13 @@ def from_cookie_file(path: str | Path, *, user_agent: str | None = None) -> Sess
     cookies: dict[str, str] = {}
     for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line:
+            continue
+        # curl's format marks HttpOnly cookies with a "#HttpOnly_" prefix on the
+        # domain field; those are real records, not comments.
+        if line.startswith(HTTPONLY_PREFIX):
+            line = line[len(HTTPONLY_PREFIX) :]
+        elif line.startswith("#"):
             continue
         fields = line.split("\t")
         if len(fields) < 7:

@@ -179,7 +179,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 211 项测试(全部离线)
+└── tests/                           # 245 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -192,6 +192,10 @@ facebook-mcp/
     ├── test_m5_message.py           # 发送流程、回退链、收件人解析、Page 身份拦截
     ├── test_route_doc_ids.py        # doc_id 覆盖、错误信封、模板提升
     ├── test_smoke_mcp.py            # smoke 客户端的管道/EOF 行为
+    ├── test_sniff_capture.py         # 抓包循环读取已缓冲事件
+    ├── test_tools_account_binding.py # --account 决定连接哪个浏览器
+    ├── test_launch_script.py         # 端口分配 / --stop 精确匹配(仅 --dry-run)
+    ├── test_check_layers.py          # 分层检查器自身(含注入违规)
     ├── test_logged_out_matrix.py    # 无痕(零 cookie)基线结论的回归测试
     └── test_commit_msg.py           # 提交信息规范校验器自身
 ```
@@ -246,6 +250,7 @@ class HttpRequest:
     json: Any | None = None                       # JSON body
     impersonate: str | None = None                # per-request TLS 指纹覆盖
     transport_hint: Literal["http", "cdp"] | None = None   # hybrid 分流依据
+    credentials: Literal["include", "omit"] = "include"     # omit: 浏览器 fetch 不带 cookie
 
 @dataclass(frozen=True)
 class HttpResponse:
@@ -497,15 +502,21 @@ tools/launch_chrome_debug.sh --account default          # 端口 9222
 tools/launch_chrome_debug.sh --account work             # 端口自动 9223
 tools/launch_chrome_debug.sh --account work --seed      # 首次:从主 Chrome 移植 cookie
 tools/launch_chrome_debug.sh --account work --stop      # 只关这个账号的实例
+tools/launch_chrome_debug.sh --account work --dry-run   # 只打印规划,不启动
 ```
 
 | 行为 | 说明 |
 |---|---|
 | profile 位置 | `~/.facebook-mcp/accounts/<account>/chrome`(0700) |
-| 端口 | 未指定时按账号顺序推导(`9222`、`9223`…),并写回 `account.json` 的 `cdp_url` |
+| 端口 | 取**未被其它账号记录、也没有进程监听**的空闲端口;自己的记录端口空闲时优先复用。写回 `account.json` 的 `cdp_url` |
 | 主 Chrome | **从不触碰**,不需要退出用户的日常浏览器 |
 | `--seed` | 只复制 `Cookies` + `Local State`(约 3.6 MB),不带整个 13 GB profile |
-| `--stop` | 按 `--user-data-dir` 精确匹配进程,不影响其它账号 |
+| `--stop` | 按 `--user-data-dir` **精确匹配**(转义正则元字符 + 参数边界),不影响其它账号 |
+| `--dry-run` | 只打印账号/端口/cdp_url,不启动 Chrome(可直接用于验证端口分配) |
+
+> 端口**不是**按账号顺序推导的:插入新账号会让按序号分配产生碰撞,而“端口上已有
+> DevTools”也无法说明它属于哪个账号。脚本因此改为扫描空闲端口,并只在**本账号的
+> Chrome 正在运行**时才复用其记录端口。
 
 ---
 
@@ -598,8 +609,14 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | 响应体 | 不是 JSON(如 `for (;;);` 后仍是 HTML) | `ParseError`,提示 `doc_id` 可能已轮换 |
 | 旧式信封 | `{"error": <code>, "errorSummary": ...}`(无 `errors`) | `ParseError`;`1357031`(content no longer available)会点名 `doc_id` 已轮换 |
 
-**对 MCP 的表现**:`search_*` / `get_*` 抛异常交由 SDK 转成 `isError`;
-`send_message` 由 `MessageService` 捕获并返回 `SendResult(ok=False, error=...)`。
+**对 MCP 的表现**(各工具并不一致,按实际实现):
+
+| 工具 | 失败时 |
+|---|---|
+| `get_user_latest_post_time` | **不抛异常**,返回 `PostTimeResult(ok=False, error=...)`(解析不到主页/无帖子都走这里) |
+| `get_user_recent_posts` | 抛异常 → SDK 转成 `isError` |
+| `search_people` / `search_pages` | 抛异常 → SDK 转成 `isError` |
+| `send_message` | `MessageService` 捕获 → `SendResult(ok=False, error=...)` |
 
 ---
 
@@ -787,7 +804,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(211 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(245 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -832,7 +849,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:211 项,覆盖 12 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:245 项,覆盖 15 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

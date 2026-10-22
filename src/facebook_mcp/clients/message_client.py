@@ -132,7 +132,13 @@ class MessageClient(BaseClient):
         return self._profiles.resolve(cleaned).uid
 
     def send_via_graphql(self, recipient: str, text: str) -> SendResult:
-        """Protocol-level send — not available yet (doc_id not captured)."""
+        """Protocol-level send — kept as an explicit dead end.
+
+        Messenger does not expose a page-level GraphQL mutation for sending
+        (verified: the request is issued by the service worker, and the
+        Lightspeed WebSocket frames carry no readable body). See
+        ARCHITECTURE §8.3 for the evidence.
+        """
         raise UnsupportedError(
             "Messenger sends go through Facebook's service worker / Lightspeed "
             "WebSocket, not a page-level GraphQL mutation. Use the browser path."
@@ -332,10 +338,22 @@ class MessageClient(BaseClient):
         if focused != "ok":
             raise ParseError("could not focus the Messenger composer")
 
+        # insertText appends at the caret, so an unsent draft would be sent
+        # together with our message ("old draft: hello"). Never touch it.
+        draft = self._composer_text(cdp)
+        if draft is None:
+            raise ParseError("the Messenger composer disappeared while composing")
+        if draft.strip():
+            raise FacebookError(
+                "the Messenger composer already contains an unsent draft "
+                f"({draft[:80]!r}); nothing was sent. Clear it in the browser "
+                "and retry."
+            )
+
         cdp.send("Input.insertText", {"text": text})
         time.sleep(0.3)
 
-        typed = self._composer_text(cdp)
+        typed = self._composer_text(cdp) or ""
         if text[:20] not in typed:
             raise ParseError(
                 f"composer did not accept the text (got {typed!r}); aborting before send"
@@ -351,11 +369,17 @@ class MessageClient(BaseClient):
             )
 
     @staticmethod
-    def _composer_text(cdp: CdpTransport) -> str:
+    def _composer_text(cdp: CdpTransport) -> str | None:
+        """Current composer text, or ``None`` when the composer is gone.
+
+        The distinction matters for the delivery check: an empty string means
+        "sent", ``None`` means the DOM changed underneath us and nothing can be
+        concluded.
+        """
         value: Any = cdp.evaluate(
-            _script("\n  return composer ? (composer.innerText || '') : '';\n")
+            _script("\n  return composer ? (composer.innerText || '') : null;\n")
         )
-        return str(value or "")
+        return None if value is None else str(value)
 
     @staticmethod
     def _click_send(cdp: CdpTransport) -> bool:
@@ -390,9 +414,20 @@ class MessageClient(BaseClient):
             )
 
     def _wait_until_cleared(self, cdp: CdpTransport, timeout: float = 15.0) -> bool:
+        """True only when the composer still exists and is empty.
+
+        A vanished composer is *not* success: a re-render or navigation also
+        removes it, and silently reporting delivery would hide that.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not self._composer_text(cdp).strip():
+            current = self._composer_text(cdp)
+            if current is None:
+                raise ParseError(
+                    "the Messenger composer disappeared after sending; delivery "
+                    "cannot be confirmed (the message may still have been sent)"
+                )
+            if not current.strip():
                 return True
             time.sleep(0.4)
         return False

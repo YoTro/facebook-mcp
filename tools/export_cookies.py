@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from facebook_mcp.core.accounts import AccountPaths, list_accounts, resolve_home
 from facebook_mcp.core.config import get_settings
+from facebook_mcp.services.factory import build_settings
 from facebook_mcp.transport.cdp import CdpTransport
 
 
@@ -50,17 +51,26 @@ def main(argv: list[str] | None = None) -> int:
             meta = paths.load_meta()
             state = "authenticated" if paths.cookies_file.is_file() else "no cookies"
             user = meta.get("c_user") or "-"
-            print(f"  {name:12s} {state:14s} c_user={user}  {paths.directory}")
+            cdp = meta.get("cdp_url") or "(global)"
+            print(f"  {name:12s} {state:14s} c_user={user:<18s} {cdp}  {paths.directory}")
         return 0
 
     paths = AccountPaths.for_account(args.account, home)
 
-    transport = CdpTransport(get_settings())
+    # build_settings() merges the per-account overrides from account.json, so
+    # --account also selects *which browser* to read. Using get_settings() here
+    # silently exported from whichever Chrome FB_ACCOUNT pointed at.
+    settings = build_settings(args.account)
+    transport = CdpTransport(settings)
     try:
         cookies = transport.cookies(args.url)
     except Exception as exc:  # noqa: BLE001
-        print(f"cannot read cookies from Chrome: {exc}", file=sys.stderr)
-        print("Start Chrome with: bash tools/launch_chrome_debug.sh", file=sys.stderr)
+        print(f"cannot read cookies from Chrome at {settings.cdp_url}: {exc}", file=sys.stderr)
+        print(
+            f"Start that account's Chrome with: "
+            f"bash tools/launch_chrome_debug.sh --account {args.account}",
+            file=sys.stderr,
+        )
         return 1
     finally:
         transport.close()

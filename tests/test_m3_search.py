@@ -99,8 +99,8 @@ def test_parse_results_pages(payload: dict[str, Any]) -> None:
 def test_parse_results_keeps_pages_in_page_search(payload: dict[str, Any]) -> None:
     results = SearchClient._parse_results(payload, SearchCategory.PAGES)
     page = next(r for r in results if r.id == "987654321")
-    assert page.name == "Perth Pest Control"
-    assert page.url == "https://www.facebook.com/perthpestcontrol"
+    assert page.name == "Example Business"
+    assert page.url == "https://www.facebook.com/example-business"
     assert page.category is SearchCategory.PAGES
     assert page.verified is True
     assert page.subtitle == "Pest Control Service"

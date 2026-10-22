@@ -39,8 +39,9 @@ from urllib.parse import parse_qs, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from facebook_mcp.core.config import Settings, get_settings
+from facebook_mcp.core.config import Settings
 from facebook_mcp.routes.graphql import ALL as GRAPHQL_ROUTES
+from facebook_mcp.services.factory import build_settings
 from facebook_mcp.transport.cdp import CdpTransport
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Capture Facebook GraphQL routes via CDP")
     parser.add_argument("--seconds", type=float, default=60.0, help="capture duration")
     parser.add_argument("--url-contains", default="graphql", help="filter URL substring")
+    parser.add_argument(
+        "--account",
+        default=None,
+        help="account whose cdp_url to attach to (default: FB_ACCOUNT)",
+    )
     parser.add_argument(
         "--navigate",
         default=None,
@@ -92,7 +98,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    settings = get_settings()
+    # build_settings() applies the account's cdp_url from account.json; plain
+    # get_settings() would attach to the global FB_CDP_URL and capture from the
+    # wrong browser when several accounts run side by side.
+    settings = build_settings(args.account)
     transport = CdpTransport(settings)
 
     try:
@@ -114,60 +123,31 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capturing for {args.seconds:.0f}s — now use Facebook in the browser:")
     print("  • open a profile timeline          (ProfileCometTimelineFeed*)")
     print("  • run a people/page search          (SearchCometResults*)")
-    print("  • send a Messenger message          (SendMessageMutation)\n")
+    print(
+        "  • send a Messenger message          (sent by the service worker, so a\n"
+        "                                       mutation may never appear here)"
+    )
+    print()
 
     captured: dict[str, dict[str, object]] = {}
     deadline = time.monotonic() + args.seconds
-    ws = transport._connect()
 
-    ws.settimeout(1.0)
-    while time.monotonic() < deadline:
-        try:
-            raw = ws.recv()
-        except Exception:  # noqa: BLE001 - timeout / socket closed
-            continue
-        if not raw:
-            continue
-        try:
-            message = json.loads(raw)
-        except ValueError:
-            continue
-        if message.get("method") != "Network.requestWillBeSent":
-            continue
-
-        params = message.get("params") or {}
-        request = params.get("request") or {}
-        url = request.get("url") or ""
-        if args.url_contains not in url:
-            continue
-
-        fields = _form_fields(request.get("postData"))
-        doc_id = fields.get("doc_id") or fields.get("query_id")
-        friendly = fields.get("fb_api_req_friendly_name") or request.get("X-FB-Friendly-Name")
-        if not doc_id and not friendly:
-            continue
-
-        key = f"{friendly or '?'}:{doc_id or '?'}"
+    def on_entry(entry: dict[str, object]) -> None:
+        key = f"{entry['friendly_name'] or '?'}:{entry['doc_id'] or '?'}"
         if key in captured:
-            continue
-
-        entry = {
-            "doc_id": doc_id,
-            "friendly_name": friendly,
-            "url": url,
-            "method": request.get("method"),
-            "variables": _try_json(fields.get("variables")),
-        }
+            return
         captured[key] = entry
 
         if args.save_templates and entry["variables"] is not None:
-            saved = _save_template(str(friendly or "unknown"), entry["variables"])
+            saved = _save_template(str(entry["friendly_name"] or "unknown"), entry["variables"])
             if saved is not None:
                 print(f"    template  -> {_short(saved)}")
 
-        print(f"+ {friendly or '?'}")
-        print(f"    doc_id    : {doc_id}")
+        print(f"+ {entry['friendly_name'] or '?'}")
+        print(f"    doc_id    : {entry['doc_id']}")
         print(f"    variables : {json.dumps(entry['variables'])[:140]}\n")
+
+    _capture(transport, deadline, args.url_contains, on_entry)
 
     print(f"\ncaptured {len(captured)} unique route(s)")
     if captured:
@@ -216,13 +196,60 @@ def _save_template(friendly_name: str, variables: object) -> Path | None:
     return target
 
 
+def _entry_from_event(message: dict[str, object], url_contains: str) -> dict[str, object] | None:
+    """Turn a ``Network.requestWillBeSent`` event into a capture entry."""
+    if message.get("method") != "Network.requestWillBeSent":
+        return None
+
+    params = message.get("params") or {}
+    request = params.get("request") or {}
+    url = request.get("url") or ""
+    if url_contains not in url:
+        return None
+
+    fields = _form_fields(request.get("postData"))
+    doc_id = fields.get("doc_id") or fields.get("query_id")
+    friendly = fields.get("fb_api_req_friendly_name") or request.get("X-FB-Friendly-Name")
+    if not doc_id and not friendly:
+        return None
+
+    return {
+        "doc_id": doc_id,
+        "friendly_name": friendly,
+        "url": url,
+        "method": request.get("method"),
+        "variables": _try_json(fields.get("variables")),
+    }
+
+
+def _capture(
+    transport: object,
+    deadline: float,
+    url_contains: str,
+    on_entry,
+) -> None:
+    """Drain captured events until ``deadline``, reporting each new route.
+
+    ``drain_events()`` returns the events buffered while a CDP command was
+    waiting for its reply, then reads the socket. Reading the raw WebSocket
+    instead would lose everything that arrived during ``Page.navigate()``.
+    """
+    while time.monotonic() < deadline:
+        for message in transport.drain_events(timeout=0.8):  # type: ignore[attr-defined]
+            entry = _entry_from_event(message, url_contains)
+            if entry is not None:
+                on_entry(entry)
+
+
 def _record_doc_ids(settings: Settings, captured: dict[str, dict[str, object]]) -> Path | None:
     """Persist freshly captured ``doc_id`` values into the account store.
 
     ``routes/graphql.py`` only carries a bootstrap default; the live value is
-    read from ``account.json`` at request time (``BaseClient._doc_id``), because
-    ``doc_id`` rotates with every frontend build. Returns the metadata file it
-    touched, or ``None`` when nothing captured maps onto a known route.
+    read from ``account.json`` when the server builds its services and cached
+    per account (``BaseClient._doc_id``), so a running server must be restarted
+    to pick up a refresh. ``doc_id`` rotates with every frontend build. Returns
+    the metadata file it touched, or ``None`` when nothing captured maps onto a
+    known route.
     """
     ops = {r.friendly_name: r.op for r in GRAPHQL_ROUTES if r.friendly_name}
     fresh: dict[str, str] = {}

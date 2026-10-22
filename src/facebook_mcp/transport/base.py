@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from ..core.exceptions import HttpStatusError
 
 TransportHint = Literal["http", "cdp"]
+Credentials = Literal["include", "omit"]
 
 # Facebook prefixes JSON bodies of its legacy AJAX endpoints with this guard so
 # the response cannot be captured as a cross-site ``<script>`` (JSON hijacking).
@@ -30,6 +31,12 @@ class HttpRequest:
     impersonate: str | None = None  # per-request TLS fingerprint override
     transport_hint: TransportHint | None = None
     """Preferred transport; ``cdp`` routes through the live browser."""
+    credentials: Credentials = "include"
+    """``omit`` keeps cookies out of a browser-executed request.
+
+    Browsers attach their own cookie jar to ``fetch()`` regardless of headers,
+    so an anonymous route needs ``credentials: "omit"`` rather than just a
+    missing ``Cookie`` header."""
 
 
 @dataclass(frozen=True)

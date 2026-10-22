@@ -40,6 +40,52 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **`--account` selected only the storage folder, not the browser.**
+  `tools/export_cookies.py` and `tools/sniff.py` used `get_settings()`, so they
+  read `FB_CDP_URL` and could export account A's cookie jar into account B's
+  directory. Both now build settings through `build_settings(account)`, which
+  applies that account's `cdp_url`. `export_cookies --list` shows the binding.
+- **The launcher allocated colliding ports and could kill the wrong browser.**
+  Ports were derived from the account's position in a sorted list, so inserting
+  an account renumbered the others, and a live DevTools listener on the computed
+  port was treated as success without checking ownership. Allocation now picks a
+  port no other account recorded and nothing listens on, reusing the account's
+  own recorded port only while its Chrome runs. `--stop` matched the profile path
+  with `pgrep -f` as an unescaped regex, so account `a.b` also matched `axb`;
+  the pattern is now escaped and anchored to an argument boundary. `--dry-run`
+  was added so allocation can be verified without launching a browser.
+- **`send_message` concatenated an existing draft.** `insertText` appends at the
+  caret, so an unsent draft became `old draft: hello`. The client now refuses
+  before typing when the composer is non-empty, and nothing is sent.
+- **A vanished composer counted as a successful send.** `_composer_text()`
+  returned `""` both for "empty" and "not found", so a re-render or navigation
+  was reported as delivery. It now returns `None` for a missing composer, and the
+  delivery check raises instead of assuming success.
+- **curl_cffi's own cookie jar defeated `anonymous` routes too.** Skipping the
+  `Cookie` header was not enough: a GraphQL search response sets `c_user`/`xs`
+  on the transport's jar, and the next "anonymous" profile fetch then carried
+  them and received the logged-in SPA shell. `credentials="omit"` now routes
+  through a dedicated session whose jar is cleared before every request.
+- **CDP requests ignored `anonymous` routes.** Even when the client omitted the
+  `Cookie` header, the in-page `fetch()` still used `credentials: "include"`, so
+  a logged-in browser sent the session to the profile page — defeating
+  `PROFILE_PAGE.anonymous`. `HttpRequest.credentials` now carries that intent and
+  the CDP transport forwards it.
+- **`tools/sniff.py` read the raw WebSocket and lost buffered events.** Requests
+  fired during `Page.navigate()` are buffered by the CDP client while it waits
+  for the command reply; the capture loop skipped that buffer, so a capture could
+  report zero routes even though the requests had arrived. It now drains through
+  `CdpTransport.drain_events()`.
+- **`#HttpOnly_` cookies were dropped.** curl writes HttpOnly entries with that
+  prefix; the parser treated every `#` line as a comment and silently produced an
+  unauthenticated jar.
+- **Retries bypassed the request throttle.** `_throttle()` ran once before the
+  retry loop, so a retry could fire immediately after the previous attempt.
+- **The layering checker could not fail.** Relative imports were resolved to the
+  package only and absolute `facebook_mcp.*` imports were dropped, so injected
+  upward imports produced "0 violations". Both forms are now resolved to a full
+  module path, `from pkg import mod` is handled, results are de-duplicated, and
+  `tests/test_check_layers.py` proves the checker catches injected violations.
 - **`get_user_latest_post_time` failed whenever cookies were configured.** The
   profile page is served as a logged-in SPA shell when a session cookie is sent
   (no `userVanity`, no `timeline_list_feed_units`), so the parser reported

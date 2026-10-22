@@ -30,10 +30,17 @@ class CurlCffiTransport(Transport):
         self._min_interval = settings.min_request_interval
         self._last_request_started = 0.0
 
-        headers: dict[str, str] = {"Accept-Language": "en-US,en;q=0.9"}
+        self._headers = {"Accept-Language": "en-US,en;q=0.9"}
         if settings.user_agent:
-            headers["User-Agent"] = settings.user_agent
-        self._session = curl_requests.Session(impersonate=self._impersonate, headers=headers)
+            self._headers["User-Agent"] = settings.user_agent
+        self._session = curl_requests.Session(impersonate=self._impersonate, headers=self._headers)
+
+        # Requests with credentials="omit" must not carry *any* cookie, not even
+        # one this jar picked up from an earlier response. curl_cffi applies the
+        # session jar independently of the Cookie header, and a GraphQL response
+        # can set c_user/xs — which would silently turn the "anonymous" profile
+        # fetch back into a logged-in one.
+        self._anonymous_session: curl_requests.Session | None = None
 
         self._proxy = resolve_proxy(settings.proxy, settings.proxy_from_system)
         if self._proxy:
@@ -45,13 +52,16 @@ class CurlCffiTransport(Transport):
         return "curl_cffi"
 
     def request(self, req: HttpRequest) -> HttpResponse:
-        self._throttle()
         impersonate = req.impersonate or self._impersonate
         last_error: str | None = None
+        session = self._session_for(req.credentials)
 
         for attempt in range(self._max_retries):
+            # Throttle every attempt, not just the first: a retry is still a
+            # request and must respect the configured minimum interval.
+            self._throttle()
             try:
-                resp = self._session.request(
+                resp = session.request(
                     req.method,
                     req.url,
                     headers=req.headers,
@@ -86,6 +96,22 @@ class CurlCffiTransport(Transport):
 
     def close(self) -> None:
         self._session.close()
+        if self._anonymous_session is not None:
+            self._anonymous_session.close()
+            self._anonymous_session = None
+
+    def _session_for(self, credentials: str) -> curl_requests.Session:
+        """Pick the session for a request; ``omit`` never carries cookies."""
+        if credentials != "omit":
+            return self._session
+        if self._anonymous_session is None:
+            self._anonymous_session = curl_requests.Session(
+                impersonate=self._impersonate, headers=self._headers
+            )
+            if self._proxy:
+                self._anonymous_session.proxies = proxy_mapping(self._proxy)
+        self._anonymous_session.cookies.clear()
+        return self._anonymous_session
 
     def _proxies_for(self, url: str) -> dict[str, str] | None:
         """Per-request proxy override.

@@ -195,7 +195,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 211 tests (all offline)
+└── tests/                           # 245 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -208,6 +208,10 @@ facebook-mcp/
     ├── test_m5_message.py           # send flow, fallback chain, recipient resolution, Page refusal
     ├── test_route_doc_ids.py        # doc_id overrides, error envelopes, template promotion
     ├── test_smoke_mcp.py            # smoke-client pipe / EOF behaviour
+    ├── test_sniff_capture.py         # capture loop reads already-buffered events
+    ├── test_tools_account_binding.py # --account selects the browser, not just the folder
+    ├── test_launch_script.py         # port allocation / exact --stop matching (--dry-run only)
+    ├── test_check_layers.py          # the layering checker itself (incl. injected violations)
     ├── test_logged_out_matrix.py    # regression tests for the incognito baseline
     └── test_commit_msg.py           # the commit-message validator itself
 ```
@@ -264,6 +268,7 @@ class HttpRequest:
     json: Any | None = None                       # JSON body
     impersonate: str | None = None                # per-request TLS fingerprint override
     transport_hint: Literal["http", "cdp"] | None = None   # hybrid routing hint
+    credentials: Literal["include", "omit"] = "include"    # omit: browser fetch sends no cookies
 
 @dataclass(frozen=True)
 class HttpResponse:
@@ -359,6 +364,9 @@ layer (`base.py` only defines dataclasses).
   (`{"search.results": "..."}`). `doc_id` rotates with every frontend build and
   can differ per account, so the live value lives in the credential store —
   refreshing it needs no source change and produces no commit.
+- ⚠️ That override is read **when `Services` is constructed** and cached per
+  account (`get_services(account)` is `lru_cache`d). After refreshing
+  `account.json`, **restart the MCP server** for it to take effect.
 
 - `templates/` — the search `variables` template. It has 42 fields (27 of them
   Relay feature gates) and is managed **as data**; `build_search_variables()`
@@ -556,15 +564,22 @@ tools/launch_chrome_debug.sh --account default          # port 9222
 tools/launch_chrome_debug.sh --account work             # port derived, 9223
 tools/launch_chrome_debug.sh --account work --seed      # first run: seed cookies from the main Chrome
 tools/launch_chrome_debug.sh --account work --stop      # stop only this account
+tools/launch_chrome_debug.sh --account work --dry-run   # print the plan, launch nothing
 ```
 
 | Behaviour | Detail |
 |---|---|
 | profile location | `~/.facebook-mcp/accounts/<account>/chrome` (0700) |
-| port | derived from account order when unset (`9222`, `9223`, …) and written back to `cdp_url` in `account.json` |
+| port | first free port that no other account has recorded and nothing is listening on; the account's own recorded port is reused when still free. Written back to `cdp_url` |
 | main Chrome | **never touched**; the user's everyday browser does not need to quit |
 | `--seed` | copies only `Cookies` + `Local State` (~3.6 MB) instead of the whole 13 GB profile |
-| `--stop` | matches processes by `--user-data-dir`, so other accounts are unaffected |
+| `--stop` | exact `--user-data-dir` match (regex metacharacters escaped + argument boundary), so other accounts are unaffected |
+| `--dry-run` | prints account/port/cdp_url and launches nothing (useful to verify allocation) |
+
+> Ports are deliberately **not** derived from account order: inserting an account
+> makes positional allocation collide, and a live DevTools listener says nothing
+> about which account owns it. The launcher therefore scans for a free port and
+> reuses a recorded one only while that account's Chrome is actually running.
 
 ---
 
@@ -662,9 +677,14 @@ TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt temp
 | Body | not JSON (e.g. HTML after the `for (;;);` guard) | `ParseError` hinting the `doc_id` may have rotated |
 | Legacy envelope | `{"error": <code>, "errorSummary": ...}` (no `errors`) | `ParseError`; `1357031` (content no longer available) names the rotated `doc_id` |
 
-**How it surfaces through MCP**: `search_*` / `get_*` raise, and the SDK turns
-that into `isError`; `send_message` is caught by `MessageService` and returned as
-`SendResult(ok=False, error=...)`.
+**How it surfaces through MCP** (deliberately not uniform):
+
+| Tool | On failure |
+|---|---|
+| `get_user_latest_post_time` | does **not** raise; returns `PostTimeResult(ok=False, error=...)` |
+| `get_user_recent_posts` | raises → the SDK reports `isError` |
+| `search_people` / `search_pages` | raises → `isError` |
+| `send_message` | caught by `MessageService` → `SendResult(ok=False, error=...)` |
 
 ---
 
@@ -871,7 +891,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (211), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (245), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -919,7 +939,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 211 across 12 files (including a CDP integration test against a mock DevTools server)
+- Tests: 245 across 15 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

@@ -86,6 +86,7 @@ class BaseClient:
                 params=params,
                 data=data,
                 transport_hint=hint,
+                credentials="omit" if route.anonymous else "include",
             )
         )
         self._raise_for_facebook_status(resp)

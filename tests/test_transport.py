@@ -18,7 +18,14 @@ class _Handler(BaseHTTPRequestHandler):
     flaky_count = 0
 
     def do_GET(self) -> None:
-        if self.path == "/ok":
+        if self.path == "/echo-headers":
+            self._respond(200, str(dict(self.headers)))
+        elif self.path == "/set-cookie":
+            self.send_response(200)
+            self.send_header("Set-Cookie", "c_user=99; Path=/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.path == "/ok":
             self._respond(200, "hello")
         elif self.path == "/status/404":
             self._respond(404, "not found")
@@ -138,5 +145,54 @@ def test_throttle(server: str) -> None:
         t.request(HttpRequest("GET", f"{server}/ok"))
         elapsed = time.monotonic() - start
         assert elapsed >= 0.15
+    finally:
+        t.close()
+
+
+def test_throttle_applies_to_every_retry(server: str) -> None:
+    """A retry is still a request: it must respect min_request_interval."""
+    t = _make_transport(max_retries=2, min_request_interval=0.3)
+    # Isolate the throttle from the exponential backoff.
+    t._backoff = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    try:
+        start = time.monotonic()
+        resp = t.request(HttpRequest("GET", f"{server}/flaky"))
+        elapsed = time.monotonic() - start
+        assert resp.status_code == 200
+        # Two attempts, at least one full interval apart.
+        assert elapsed >= 0.25, f"retry bypassed the throttle (elapsed {elapsed:.2f}s)"
+    finally:
+        t.close()
+
+
+def test_omit_credentials_never_sends_the_jar(server: str) -> None:
+    """A response can set cookies; an "omit" request must still be cookie-free.
+
+    curl_cffi applies the session jar independently of the Cookie header, so a
+    GraphQL response that sets c_user/xs would otherwise turn the "anonymous"
+    profile fetch back into a logged-in one.
+    """
+    t = _make_transport(max_retries=1)
+    try:
+        # /json does not set cookies, so seed the jar explicitly.
+        t._session.cookies.set("c_user", "42", domain="127.0.0.1")
+
+        resp = t.request(HttpRequest("GET", f"{server}/echo-headers", credentials="omit"))
+        assert "Cookie" not in resp.text
+
+        # The same request without "omit" does carry it.
+        resp = t.request(HttpRequest("GET", f"{server}/echo-headers"))
+        assert "c_user=42" in resp.text
+    finally:
+        t.close()
+
+
+def test_omit_requests_do_not_pollute_each_other(server: str) -> None:
+    """The anonymous session is cleared before every omit request."""
+    t = _make_transport(max_retries=1)
+    try:
+        t.request(HttpRequest("GET", f"{server}/set-cookie", credentials="omit"))
+        resp = t.request(HttpRequest("GET", f"{server}/echo-headers", credentials="omit"))
+        assert "Cookie" not in resp.text
     finally:
         t.close()
