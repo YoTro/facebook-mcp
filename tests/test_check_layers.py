@@ -113,3 +113,22 @@ def test_repository_check_catches_an_injected_violation(tmp_path: Path) -> None:
     violations = check_layers.check_path(root, "facebook_mcp")
     assert violations, "injected upward import was not detected"
     assert any("core -> clients" in v for v in violations)
+
+
+def test_package_init_relative_imports_are_resolved(tmp_path: Path) -> None:
+    """``__init__.py`` *is* its package, so ``from ..x`` starts one level higher."""
+    root = _package(tmp_path)
+    _write(root, "core/__init__.py", "from ..clients import b\n")
+    _write(root, "clients/b.py", "thing = 1\n")
+
+    violations = check_layers.check_path(root, "demo")
+    assert violations, "an upward import in core/__init__.py was not detected"
+    assert any("core -> clients" in v for v in violations)
+
+
+def test_package_init_sibling_import_is_fine(tmp_path: Path) -> None:
+    root = _package(tmp_path)
+    _write(root, "core/__init__.py", "from .b import thing\n")
+    _write(root, "core/b.py", "thing = 1\n")
+
+    assert check_layers.check_path(root, "demo") == []

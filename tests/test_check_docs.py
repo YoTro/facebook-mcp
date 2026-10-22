@@ -65,3 +65,61 @@ def test_lost_bullet_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_missing_table_row_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _pair(tmp_path, BODY, BODY.replace("| 1 | 2 |\n", ""), monkeypatch)
     assert check_docs.main() == 1
+
+
+UNNUMBERED = """## 1. Intro
+
+- one
+
+### A note that has no number
+
+```
+alpha
+```
+
+## 2. Next
+
+- two
+"""
+
+
+def test_moved_unnumbered_section_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The drift this catches: same sections, different parent section."""
+    moved = """## 1. Intro
+
+- one
+
+## 2. Next
+
+### A note that has no number
+
+```
+alpha
+```
+
+- two
+"""
+    _pair(tmp_path, UNNUMBERED, moved, monkeypatch)
+    assert check_docs.main() == 1
+
+
+def test_missing_unnumbered_section_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    without = """## 1. Intro
+
+- one
+
+## 2. Next
+
+- two
+"""
+    _pair(tmp_path, UNNUMBERED, without, monkeypatch)
+    assert check_docs.main() == 1
+
+
+def test_unnumbered_bodies_count_towards_the_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A code line lost inside an unnumbered subsection must still be noticed."""
+    lost = UNNUMBERED.replace("alpha\n", "")
+    _pair(tmp_path, UNNUMBERED, lost, monkeypatch)
+    assert check_docs.main() == 1

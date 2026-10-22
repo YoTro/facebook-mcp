@@ -55,18 +55,27 @@ def layer_of(rel: Path) -> str | None:
     return rel.parts[0] if rel.parts[0] in RANKS else None
 
 
-def module_name(rel: Path, package: str) -> str:
-    """Dotted module path of a file, e.g. ``facebook_mcp.clients.base``."""
+def module_name(rel: Path, package: str) -> tuple[str, bool]:
+    """Dotted module path of a file, e.g. ``facebook_mcp.clients.base``.
+
+    Returns ``(name, is_package)``. ``__init__.py`` *is* its package, which
+    matters for relative imports: ``from ..clients import x`` inside
+    ``core/__init__.py`` starts one level higher than inside ``core/base.py``.
+    """
     parts = list(rel.with_suffix("").parts)
-    if parts and parts[-1] == "__init__":
+    is_package = bool(parts) and parts[-1] == "__init__"
+    if is_package:
         parts.pop()
-    return ".".join([package, *parts]) if parts else package
+    name = ".".join([package, *parts]) if parts else package
+    return name, is_package
 
 
-def resolve(node: ast.AST, current: str) -> list[str]:
+def resolve(node: ast.AST, current: str, is_package: bool = False) -> list[str]:
     """Absolute module paths touched by an import statement.
 
-    ``current`` is the dotted name of the module doing the importing.
+    ``current`` is the dotted name of the module doing the importing;
+    ``is_package`` says whether that module is a package (``__init__.py``) and
+    therefore already *is* the base for relative imports.
     """
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
@@ -81,9 +90,10 @@ def resolve(node: ast.AST, current: str) -> list[str]:
         targets.extend(f"{base}.{alias.name}" for alias in node.names if base)
         return targets
 
-    # Relative import: start at the *package* of the current module (drop the
-    # module name itself), then walk up ``level - 1`` packages.
-    package_parts = current.split(".")[:-1]
+    # Relative import: start at the *package* of the current module. For a
+    # normal module that means dropping the module name; for ``__init__.py`` the
+    # module already is its package.
+    package_parts = current.split(".") if is_package else current.split(".")[:-1]
     extra = node.level - 1
     if extra:
         package_parts = package_parts[:-extra] if extra < len(package_parts) else []
@@ -119,13 +129,13 @@ def check_path(root: Path = DEFAULT_ROOT, package: str | None = None) -> list[st
         if layer is None:
             continue
 
-        current = module_name(rel, package)
+        current, is_package = module_name(rel, package)
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
-            for module in resolve(node, current):
+            for module in resolve(node, current, is_package):
                 target = layer_for_module(module, package)
                 if target is None:
                     continue
@@ -148,13 +158,13 @@ def find_cycles(root: Path = DEFAULT_ROOT, package: str | None = None) -> list[s
 
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root)
-        current = module_name(rel, package)
+        current, is_package = module_name(rel, package)
         graph[current]  # ensure the node exists
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
-            for module in resolve(node, current):
+            for module in resolve(node, current, is_package):
                 if module.startswith(package) and module != current:
                     graph[current].add(module)
 
