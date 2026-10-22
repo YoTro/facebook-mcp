@@ -28,12 +28,35 @@ STOP=0
 DRY_RUN=0
 PROFILE_SOURCE=""
 
-CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 MAIN_PROFILE="$HOME/Library/Application Support/Google/Chrome"
 PYTHON="${PYTHON:-python3}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 note() { printf '%s\n' "$*"; }
+
+# Locate a Chrome/Chromium binary. Only needed to actually launch, so --dry-run
+# and --stop work on machines without Chrome (and on CI).
+find_chrome() {
+  if [[ -n "${FB_CHROME:-}" ]]; then
+    printf '%s' "$FB_CHROME"
+    return
+  fi
+  local candidate
+  for candidate in \
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+    "/usr/bin/google-chrome" \
+    "/usr/bin/google-chrome-stable" \
+    "/usr/bin/chromium" \
+    "/usr/bin/chromium-browser"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  printf '%s' ""
+}
+
+CHROME="$(find_chrome)"
 
 usage() {
   sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
@@ -53,7 +76,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -x "$CHROME" ]] || die "Chrome not found at: $CHROME"
+
 
 # Must match facebook_mcp.core.accounts.ACCOUNT_NAME_RE.
 [[ "$ACCOUNT" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
@@ -116,7 +139,9 @@ devtools_alive() {  # devtools_alive <port>
 # path that is merely a prefix of another cannot match either.
 account_chrome_pids() {
   local escaped
-  escaped="$(printf '%s' "$PROFILE_DIR" | sed 's/[][\\.^$*+?(){}|]/\\&/g')"
+  # re.escape handles every metacharacter; the trailing group anchors the match
+  # to an argument boundary so a path that is a prefix of another cannot match.
+  escaped="$("$PYTHON" -c 'import re, sys; print(re.escape(sys.argv[1]))' "$PROFILE_DIR")"
   pgrep -f -- "--user-data-dir=${escaped}([[:space:]]|$)" 2>/dev/null || true
 }
 
@@ -247,6 +272,9 @@ fi
 # --- launch ---------------------------------------------------------------
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
+  if [[ ! -x "$CHROME" ]]; then
+    note "(no Chrome found; --dry-run does not launch one — set FB_CHROME to override)"
+  fi
   note "account : $ACCOUNT"
   note "profile : $PROFILE_DIR"
   note "port    : $PORT"
@@ -255,6 +283,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
+[[ -x "$CHROME" ]] || die "Chrome not found (set FB_CHROME=/path/to/chrome)"
 note "account : $ACCOUNT"
 note "profile : $PROFILE_DIR"
 note "port    : $PORT"

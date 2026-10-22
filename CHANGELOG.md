@@ -61,6 +61,13 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   returned `""` both for "empty" and "not found", so a re-render or navigation
   was reported as delivery. It now returns `None` for a missing composer, and the
   delivery check raises instead of assuming success.
+- **The launcher required Chrome even for `--dry-run` and `--stop`.** The binary
+  was looked up at a hardcoded macOS path before argument handling, so the CI
+  runner (no Chrome) failed the dry-run tests. The lookup now happens only before
+  an actual launch, honours `FB_CHROME`, and probes the usual Linux paths;
+  `--dry-run`/`--stop` work without a browser. Regex escaping for `--stop` now
+  uses `re.escape` instead of a sed character class, which is not portable across
+  BSD and GNU sed.
 - **curl_cffi's own cookie jar defeated `anonymous` routes too.** Skipping the
   `Cookie` header was not enough: a GraphQL search response sets `c_user`/`xs`
   on the transport's jar, and the next "anonymous" profile fetch then carried

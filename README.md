@@ -192,7 +192,7 @@ make check       # everything CI runs: lint, format, layers, tests, MCP smoke
 | `make fmt` | `ruff format` (rewrites) |
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
-| `make test` | `pytest -q` (245 tests, fully offline) |
+| `make test` | `pytest -q` (248 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

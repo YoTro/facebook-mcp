@@ -22,9 +22,25 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "FB_HOME": str(home), "PYTHON": sys.executable}
+def _env(home: Path) -> dict[str, str]:
+    """Environment for the launcher.
+
+    ``FB_CHROME`` points at a path that does not exist so the tests behave the
+    same on macOS (Chrome installed) and on a Linux CI runner (not installed);
+    --dry-run and --stop must not require a browser.
+    """
+    env = {
+        **os.environ,
+        "FB_HOME": str(home),
+        "PYTHON": sys.executable,
+        "FB_CHROME": "/nonexistent/chrome-for-tests",
+    }
     env.pop("FB_ACCOUNT", None)
+    return env
+
+
+def _run(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = _env(home)
     return subprocess.run(
         ["bash", str(SCRIPT), *args, "--dry-run"],
         capture_output=True,
@@ -120,7 +136,7 @@ def test_stop_kills_only_the_exact_account(tmp_path: Path) -> None:
             ["bash", str(SCRIPT), "--account", "a.b", "--stop"],
             capture_output=True,
             text=True,
-            env={**os.environ, "FB_HOME": str(tmp_path), "PYTHON": sys.executable},
+            env=_env(tmp_path),
             cwd=PACKAGE_ROOT,
             timeout=60,
         )
@@ -137,3 +153,50 @@ def test_stop_kills_only_the_exact_account(tmp_path: Path) -> None:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+
+
+def test_dry_run_does_not_require_chrome(tmp_path: Path) -> None:
+    """CI runners have no Chrome; --dry-run must still plan."""
+    _account(tmp_path, "work")
+
+    result = _run(tmp_path, "--account", "work")
+
+    assert result.returncode == 0, result.stderr
+    assert "no Chrome found" in result.stdout
+    assert _port(result) is not None
+
+
+def test_launch_without_chrome_fails_with_a_clear_message(tmp_path: Path) -> None:
+    _account(tmp_path, "work")
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--account", "work"],
+        capture_output=True,
+        text=True,
+        env=_env(tmp_path),
+        cwd=PACKAGE_ROOT,
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert "Chrome not found" in result.stderr
+
+
+def test_fb_chrome_override_is_used(tmp_path: Path) -> None:
+    _account(tmp_path, "work")
+    env = _env(tmp_path)
+    # Any executable works: the override is trusted even though it is not Chrome.
+    env["FB_CHROME"] = sys.executable
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), "--account", "work", "--dry-run"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=PACKAGE_ROOT,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # An explicit, executable path is trusted, so the "no Chrome found" note is absent.
+    assert "no Chrome found" not in result.stdout
