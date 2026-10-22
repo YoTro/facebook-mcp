@@ -35,6 +35,8 @@ class SessionManager:
             or settings.account_paths().cookies_file.is_file()
         )
         self._state = self._load(settings)
+        # Set when Facebook rejected the credentials; see invalidate().
+        self._rejected: str | None = None
 
     @property
     def state(self) -> SessionState:
@@ -51,6 +53,15 @@ class SessionManager:
     def require_auth(self) -> SessionState:
         """Return the state, raising :class:`AuthError` when not logged in."""
         if self.is_authenticated:
+            if self._rejected:
+                # An exported jar cannot be refreshed in-process: fail fast
+                # instead of replaying a cookie Facebook already refused.
+                raise AuthError(
+                    f"the session was rejected by Facebook ({self._rejected}) and "
+                    "the cookies come from a file/string, which cannot be refreshed "
+                    "in process; re-export them (tools/export_cookies.py --account "
+                    f"{self._settings.account}) and restart the server"
+                )
             return self._state
         if self._bootstrap_from_browser():
             return self._state
@@ -59,6 +70,28 @@ class SessionManager:
             "FB_COOKIE_FILE, or start Chrome with --remote-debugging-port=9222 "
             "while logged in to Facebook"
         )
+
+    def invalidate(self, reason: str) -> None:
+        """React to Facebook rejecting the current credentials.
+
+        Always drops the CSRF tokens, which rotate and are cheap to re-learn.
+        A browser-backed session also drops the cookies so the next
+        :meth:`require_auth` re-reads the live jar — that is the only channel
+        that can actually refresh. An exported jar is kept (the user may still
+        read it) but marked, so the next authenticated call fails with advice
+        instead of looping on a dead cookie.
+        """
+        self._rejected = reason or "rejected by Facebook"
+        self._state.fb_dtsg = None
+        self._state.lsd = None
+        if not self.from_config:
+            self._state.cookies.clear()
+        logger.info("session invalidated (%s)", self._rejected)
+
+    @property
+    def rejected(self) -> str | None:
+        """Why Facebook last rejected the session, if it did."""
+        return self._rejected
 
     def bootstrap_from_browser(self) -> bool:
         """Adopt cookies from the attached browser. Returns success."""
@@ -144,5 +177,6 @@ class SessionManager:
                 len(cookies),
             )
             return False
+        self._rejected = None
         logger.info("bootstrapped %d cookies from browser", len(cookies))
         return True

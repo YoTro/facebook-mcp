@@ -22,9 +22,12 @@ def isolated_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Ite
 
     from facebook_mcp.core.config import get_settings
     from facebook_mcp.services import factory
+    from facebook_mcp.transport.throttle import reset_limiters
 
+    reset_limiters()
     get_settings.cache_clear()
     factory._services_for.cache_clear()
     yield
+    reset_limiters()
     get_settings.cache_clear()
     factory._services_for.cache_clear()

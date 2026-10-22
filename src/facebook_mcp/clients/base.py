@@ -16,6 +16,7 @@ from ..core.logger import get_logger
 from ..routes.base import FACEBOOK_BASE, GRAPHQL_PATH, Route
 from ..session.manager import SessionManager
 from ..transport.base import HttpRequest, HttpResponse, Transport
+from ..transport.throttle import limiter_for
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,7 @@ class BaseClient:
         self._transport = transport
         self._session = session
         self._settings = settings
+        self._limiter = limiter_for(settings) if settings is not None else None
 
     # --- low-level ------------------------------------------------------
 
@@ -89,7 +91,14 @@ class BaseClient:
                 credentials="omit" if route.anonymous else "include",
             )
         )
-        self._raise_for_facebook_status(resp)
+        try:
+            self._raise_for_facebook_status(resp)
+        except AuthError:
+            # Only an authenticated request proves the credentials are dead;
+            # a 403 on a public page must not throw the session away.
+            if needs_auth:
+                self._session.invalidate(f"HTTP {resp.status_code} on {resp.url}")
+            raise
         return resp
 
     def _get(
@@ -306,6 +315,8 @@ class BaseClient:
                 "checkpoint",
             )
         ):
+            if self._session.is_authenticated:
+                self._session.invalidate(f"{op}: {joined}")
             raise AuthError(f"{op}: {joined}")
         raise ParseError(f"{op} failed: {joined}")
 

@@ -12,6 +12,7 @@ from facebook_mcp.core.config import Settings
 from facebook_mcp.core.exceptions import AuthError, NotFoundError, RateLimitError
 from facebook_mcp.core.extract import dig, find_all, find_first, iter_json_scripts, walk
 from facebook_mcp.routes import rest
+from facebook_mcp.routes.base import Route
 from facebook_mcp.session import SessionManager, extractor
 from facebook_mcp.transport.base import HttpResponse
 
@@ -306,3 +307,78 @@ def test_latest_post_time_reports_missing_posts() -> None:
     result = PostService(_Stub()).get_latest_post_time("exampleuser")  # type: ignore[arg-type]
     assert result.ok is False
     assert "no posts found" in (result.error or "")
+
+
+# --- auth failure handling ----------------------------------------------
+
+
+class _StatusTransport:
+    """Transport double that always answers with one status code."""
+
+    name = "status"
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.requests: list[object] = []
+
+    def request(self, req):  # type: ignore[no-untyped-def]
+        self.requests.append(req)
+        return HttpResponse(self.status, req.url, {}, "", b"")
+
+    def close(self) -> None:
+        pass
+
+
+def test_authenticated_403_invalidates_the_session() -> None:
+    session = SessionManager(Settings(cookie="c_user=1; xs=2"))
+    session.state.fb_dtsg = "DTSG"
+    session.state.lsd = "LSD"
+    client = ProfileClient(_StatusTransport(403), session, Settings())  # type: ignore[arg-type]
+
+    with pytest.raises(AuthError):
+        client._request(Route(op="x", method="GET", path="/x", requires_auth=True))
+
+    assert session.state.fb_dtsg is None
+    assert session.state.lsd is None
+    assert session.rejected is not None
+
+
+def test_anonymous_403_keeps_the_session() -> None:
+    session = SessionManager(Settings(cookie="c_user=1; xs=2"))
+    session.state.fb_dtsg = "DTSG"
+    client = ProfileClient(_StatusTransport(403), session, Settings())  # type: ignore[arg-type]
+
+    with pytest.raises(AuthError):
+        client._request(Route(op="x", method="GET", path="/x"), require_auth=False)
+
+    assert session.state.fb_dtsg == "DTSG"
+    assert session.rejected is None
+
+
+def test_rejected_exported_jar_fails_fast_instead_of_looping() -> None:
+    session = SessionManager(Settings(cookie="c_user=1; xs=2"))
+    session.invalidate("HTTP 403 on /x")
+    # The cookie is kept (it came from a file/string) but marked.
+    assert session.state.is_authenticated is True
+    with pytest.raises(AuthError, match="re-export"):
+        session.require_auth()
+
+
+def test_browser_backed_session_recovers_after_invalidation() -> None:
+    calls: list[int] = []
+
+    def provider() -> dict[str, str]:
+        calls.append(1)
+        # The first bootstrap gets the stale identity, the second the fresh one.
+        return {"c_user": "1", "xs": "2"} if len(calls) == 1 else {"c_user": "9", "xs": "9"}
+
+    session = SessionManager(Settings(), provider)
+    session.require_auth()
+    assert session.state.user_id == "1"
+
+    session.invalidate("HTTP 403 on /x")
+    assert session.state.cookies == {}
+
+    session.require_auth()
+    assert session.state.user_id == "9"
+    assert session.rejected is None

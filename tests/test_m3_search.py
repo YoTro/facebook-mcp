@@ -305,3 +305,15 @@ def test_services_exposes_search() -> None:
         assert isinstance(services.transport, HybridTransport)
     finally:
         services.close()
+
+
+def test_graphql_auth_error_invalidates_the_session() -> None:
+    """A 'log in' Relay error means the cookie jar is dead; retrying loops."""
+    client, _ = _search_client({"errors": [{"message": "Please log in to continue"}]})
+    client._session.state.fb_dtsg = "DTSGTOKEN"
+
+    with pytest.raises(Exception, match="log in"):
+        client.search("pest control", SearchCategory.PAGES, 2)
+
+    assert client._session.state.fb_dtsg is None
+    assert client._session.rejected is not None
