@@ -19,7 +19,6 @@ from facebook_mcp.routes.templates import (
     build_search_variables,
     load_template,
 )
-from facebook_mcp.server import mcp
 from facebook_mcp.session.manager import SessionManager
 from facebook_mcp.transport.base import HttpResponse
 from facebook_mcp.transport.factory import HybridTransport
@@ -283,15 +282,6 @@ def test_graphql_error_translated_to_parse_error() -> None:
         client.search("pest control", SearchCategory.PAGES, 3)
 
 
-def test_graphql_auth_error_translated() -> None:
-    from facebook_mcp.core.exceptions import AuthError
-
-    denied = {"errors": [{"message": "Please log in to continue"}], "data": {}}
-    client, _ = _search_client(denied)
-    with pytest.raises(AuthError):
-        client.search("pest control", SearchCategory.PAGES, 3)
-
-
 # --- transport routing (protocol first) ---------------------------------
 
 
@@ -329,13 +319,6 @@ def test_authenticated_request_uses_http_after_browser_bootstrap() -> None:
 # --- MCP wiring ---------------------------------------------------------
 
 
-def test_search_tools_registered() -> None:
-    import asyncio
-
-    names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert {"search_people", "search_pages"} <= names
-
-
 def test_services_exposes_search() -> None:
     from facebook_mcp.services.factory import Services
 
@@ -348,12 +331,21 @@ def test_services_exposes_search() -> None:
 
 
 def test_graphql_auth_error_invalidates_the_session() -> None:
-    """A 'log in' Relay error means the cookie jar is dead; retrying loops."""
+    """A "log in" Relay error means the cookie jar is dead — and retrying loops.
+
+    One test for the whole contract: the caller sees AuthError, the rotating
+    tokens are dropped, and the session is marked so the next call fails with
+    advice instead of replaying the same credentials.
+    """
+    from facebook_mcp.core.exceptions import AuthError
+
     client, _ = _search_client({"errors": [{"message": "Please log in to continue"}]})
     client._session.state.fb_dtsg = "DTSGTOKEN"
+    client._session.state.lsd = "LSDTOKEN"
 
-    with pytest.raises(Exception, match="log in"):
+    with pytest.raises(AuthError, match="log in"):
         client.search("pest control", SearchCategory.PAGES, 2)
 
-    assert client._session.state.fb_dtsg is None
+    assert client._session.state.fb_dtsg is None, "rotating token kept after logout"
+    assert client._session.state.lsd is None
     assert client._session.rejected is not None

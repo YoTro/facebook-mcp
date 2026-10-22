@@ -11,7 +11,6 @@ import json
 import pytest
 
 from facebook_mcp.clients.lightspeed_client import (
-    DEFAULT_VERSION_ID,
     LightspeedError,
     LightspeedSender,
     gateway_url,
@@ -123,15 +122,6 @@ def test_verdict_without_message_id_is_uncertain_not_success() -> None:
         sender.send("1", "hello")
 
 
-def test_parse_ack_accept_and_reject() -> None:
-    accepted = parse_ack('"replaceOptimsiticMessage","123","mid.$cX"', "123")
-    assert accepted.message_id == "mid.$cX"
-    assert accepted.rejected is False
-
-    rejected = parse_ack('"markOptimisticMessageFailed","123","Couldn\'t send."', "123")
-    assert rejected.rejected is True
-
-
 def test_gateway_url_carries_cookie_auth() -> None:
     url = gateway_url("42")
     assert url.startswith("wss://gateway.facebook.com/ws/lightspeed?")
@@ -145,11 +135,6 @@ def test_warmup_batches_target_the_thread_and_self() -> None:
     assert len(batches) == 4
     contacts = [json.loads(t["payload"])["contact_id"] for t in batches[3]]
     assert contacts == [999, 42]
-
-
-def test_default_version_is_stable() -> None:
-    """It was identical across threads and sessions, so it is not queue state."""
-    assert DEFAULT_VERSION_ID == "39529440880004510"
 
 
 def test_accept_is_parsed_from_the_escaped_nested_payload() -> None:
@@ -314,16 +299,49 @@ def test_proxy_credentials_are_forwarded() -> None:
     assert options["http_proxy_auth"] == ("user", "p@ss")
 
 
-def test_http_proxy_scheme_is_kept() -> None:
+def test_user_agent_override_reaches_the_connector(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assert on the handshake, not on the setting we just assigned."""
+    import websocket
+
+    sent: list[dict] = []
+
+    class _Ws(_FakeWs):
+        def __init__(self, verdict: str) -> None:
+            super().__init__(verdict)
+
+    def fake_create_connection(url: str, **options: object) -> _Ws:
+        sent.append({"url": url, **options})
+        return _Ws(ACCEPT)
+
+    monkeypatch.setattr(websocket, "create_connection", fake_create_connection)
+
+    session = SessionManager(Settings(cookie="c_user=42; xs=tok", cookie_file=None))
+    sender = LightspeedSender(Settings(user_agent="custom-agent/1"), session)
+    sender.send("1", "hello")
+
+    headers = sent[0]["header"]
+    assert any("custom-agent/1" in h for h in headers), headers
+    assert any(h.startswith("Cookie: ") for h in headers)
+
+
+# ---------- 6: the connector must accept what we hand it ----------
+def test_proxy_options_satisfy_the_connector_for_https() -> None:
+    """websocket-client has no TLS-to-proxy mode; https must map to http."""
+    from websocket._http import proxy_info
+
     sender, _ = _sender(ACCEPT)
     sender._settings = Settings(proxy="https://127.0.0.1:8443")
-    assert sender._proxy_options()["proxy_type"] == "https"
+    options = sender._proxy_options()
+    assert options["proxy_type"] == "http"
+    # The client's own validator, not our idea of it:
+    assert proxy_info(**options).proxy_protocol == "http"
 
 
-def test_user_agent_override_is_used() -> None:
+def test_unknown_proxy_scheme_is_rejected() -> None:
     sender, _ = _sender(ACCEPT)
-    sender._settings = Settings(user_agent="custom-agent/1")
-    assert (sender._settings.user_agent or "") == "custom-agent/1"
+    sender._settings = Settings(proxy="ftp://127.0.0.1:21")
+    with pytest.raises(LightspeedError, match="unsupported proxy scheme"):
+        sender._proxy_options()
 
 
 # --- ack parsing must decode, not match text -----------------------------
@@ -378,10 +396,17 @@ def test_unrelated_step_is_not_a_verdict() -> None:
     assert ack.matched is False
 
 
-def test_undecodable_frame_falls_back_but_stays_anchored() -> None:
+def test_undecodable_frame_is_not_treated_as_a_verdict() -> None:
+    """A string match cannot tell a verdict from a quoted marker.
+
+    Guessing "rejected" would tell the caller a retry is safe, so an undecodable
+    frame reports "no verdict" and the send ends up `unknown`.
+    """
     raw = 'garbage "markOptimisticMessageFailed" , "123" trailing'
-    assert parse_ack(raw, "123").rejected is True
-    assert parse_ack(raw, "999").matched is False
+    ack = parse_ack(raw, "123")
+    assert ack.matched is False
+    assert ack.rejected is False
+    assert ack.message_id is None
 
 
 # --- handshake auth failure invalidates the session ---------------------

@@ -283,8 +283,8 @@ class MessageClient(BaseClient):
         pointed at it instead of guessing.
         """
         raise UnsupportedError(
-            "Messenger sends go through Facebook's service worker / Lightspeed "
-            "WebSocket, not a page-level GraphQL mutation. Use the browser path."
+            "there is no page-level GraphQL mutation for sending: Messenger posts "
+            "JSON tasks over the Lightspeed WebSocket (clients/lightspeed_client.py)."
         )
 
     # --- protocol path --------------------------------------------------

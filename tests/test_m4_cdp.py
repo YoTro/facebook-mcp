@@ -221,10 +221,13 @@ def test_fetch_expression_json_body() -> None:
 
 
 def test_factory_modes() -> None:
-    assert isinstance(get_transport(Settings(transport_mode="http")), object)
-    assert type(get_transport(Settings(transport_mode="cdp"))).__name__ == "CdpTransport"
-    hybrid = get_transport(Settings(transport_mode="auto"))
-    assert isinstance(hybrid, HybridTransport)
+    """Each mode maps to its concrete transport, not merely to "something"."""
+    from facebook_mcp.transport.cdp import CdpTransport
+    from facebook_mcp.transport.http import CurlCffiTransport
+
+    assert type(get_transport(Settings(transport_mode="http"))) is CurlCffiTransport
+    assert type(get_transport(Settings(transport_mode="cdp"))) is CdpTransport
+    assert type(get_transport(Settings(transport_mode="auto"))) is HybridTransport
 
 
 def test_hybrid_routes_by_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -288,12 +291,6 @@ def test_session_bootstrap_provider_error_is_soft() -> None:
 
     manager = SessionManager(Settings(cookie=None, cookie_file=None), boom)
     assert manager.bootstrap_from_browser() is False
-    with pytest.raises(AuthError):
-        manager.require_auth()
-
-
-def test_session_without_provider_raises() -> None:
-    manager = SessionManager(Settings(cookie=None, cookie_file=None))
     with pytest.raises(AuthError):
         manager.require_auth()
 

@@ -75,6 +75,19 @@ def _ws_handler(ws: Any) -> None:
                     for k, v in state.cookies.items()
                 ]
             }
+        elif method.split(".")[0] in ("Page", "Network", "Input", "Target"):
+            result = {}  # known domains with nothing to report
+        else:
+            # Answer like Chrome: an unknown domain/method is a protocol error.
+            ws.send(
+                json.dumps(
+                    {
+                        "id": msg_id,
+                        "error": {"code": -32601, "message": f"'{method}' wasn't found"},
+                    }
+                )
+            )
+            continue
 
         ws.send(json.dumps({"id": msg_id, "result": result}))
 
@@ -225,14 +238,16 @@ def test_connection_reused_across_calls(cdp_server: _CdpState) -> None:
 
 
 def test_unknown_method_raises(cdp_server: _CdpState) -> None:
+    """An unknown method is a protocol error, and the channel survives it."""
     from facebook_mcp.transport.cdp import CdpError
 
     transport = _transport(cdp_server)
     try:
-        # The mock replies with an empty result, so this succeeds...
-        transport.send("Domain.unknown")
-    except CdpError:
-        pass
+        with pytest.raises(CdpError, match="wasn't found"):
+            transport.send("Domain.unknown")
+
+        # The error must not have torn the connection down.
+        assert transport.cookies()["c_user"]
     finally:
         transport.close()
 

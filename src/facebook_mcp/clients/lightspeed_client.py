@@ -23,7 +23,6 @@ from __future__ import annotations
 import contextlib
 import json
 import random
-import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -199,6 +198,18 @@ class LightspeedSender:
             raise LightspeedError(f"cannot parse the configured proxy {proxy!r}")
 
         scheme = (parsed.scheme or "http").lower()
+
+        if scheme == "https":
+            # websocket-client tunnels through a *plain* HTTP CONNECT; it has no
+            # TLS-to-proxy support. Map it so `https://` entries work, and say so.
+            logger.info(
+                "proxy %s uses https; the WebSocket client tunnels over plain HTTP",
+                parsed.hostname,
+            )
+            scheme = "http"
+        elif not scheme.startswith("socks") and scheme != "http":
+            raise LightspeedError(f"unsupported proxy scheme {scheme!r} for the WebSocket client")
+
         if scheme.startswith("socks"):
             try:
                 import python_socks  # noqa: F401
@@ -212,7 +223,7 @@ class LightspeedSender:
         options: dict[str, Any] = {
             "http_proxy_host": parsed.hostname,
             "http_proxy_port": parsed.port,
-            "proxy_type": scheme,
+            "proxy_type": scheme,  # http / socks4 / socks4a / socks5 / socks5h
         }
         if parsed.username:
             options["http_proxy_auth"] = (
@@ -332,23 +343,10 @@ def parse_ack(text: str, otid: str) -> Ack:
     verdict = _find_verdict_step(nested, otid) if nested is not None else None
 
     if verdict is None:
-        # Not decodable (truncated frame, unknown envelope): fall back to a
-        # whitespace-tolerant scan, still anchored to our otid.
-        normalized = text.replace('\\"', '"')
-        rejected = re.search(rf'{REJECT_MARKER}"\s*,\s*"{re.escape(otid)}"', normalized)
-        accepted = re.search(
-            rf'{ACCEPT_MARKER}"\s*,\s*"{re.escape(otid)}"\s*,\s*"([^"]*)"', normalized
-        )
-        if rejected:
-            return Ack(otid=otid, message_id=None, rejected=True, raw=text[:400], matched=True)
-        if accepted:
-            return Ack(
-                otid=otid,
-                message_id=accepted.group(1) or None,
-                rejected=False,
-                raw=text[:400],
-                matched=True,
-            )
+        # Not decodable (truncated frame, unknown envelope). Do **not** guess from
+        # the text: a string match cannot tell a verdict from a quoted marker, and
+        # guessing "rejected" promises the caller a retry is safe. No verdict here
+        # means "keep waiting", and the caller ends up with `unknown`.
         return Ack(otid=otid, message_id=None, rejected=False, raw=text[:400], matched=False)
 
     name, message_id = verdict

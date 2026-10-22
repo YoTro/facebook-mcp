@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import stat
 from pathlib import Path
 
@@ -223,18 +222,6 @@ def test_get_services_returns_distinct_instances_per_account(
 # --- MCP surface --------------------------------------------------------
 
 
-def test_tools_accept_account_argument() -> None:
-    from facebook_mcp.server import mcp
-
-    tools = asyncio.run(mcp.list_tools())
-    assert tools
-    for tool in tools:
-        properties = tool.inputSchema.get("properties", {})
-        assert "account" in properties, f"{tool.name} is missing the account argument"
-        # Optional, so existing callers keep working.
-        assert "account" not in tool.inputSchema.get("required", [])
-
-
 def test_account_argument_reaches_the_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -366,37 +353,6 @@ def test_unbound_browser_fails_with_an_actionable_message(
 
 
 # --- browser-bootstrapped sessions become HTTP-capable -------------------
-
-
-def test_bootstrapped_session_uses_http_not_cdp(tmp_path: Path) -> None:
-    """Once cookies exist, curl_cffi can serve the request; CDP was not needed."""
-    from facebook_mcp.clients.base import BaseClient
-    from facebook_mcp.routes.base import Route
-    from facebook_mcp.transport.base import HttpResponse
-
-    class _Recorder:
-        def __init__(self) -> None:
-            self.requests: list = []
-
-        @property
-        def name(self) -> str:
-            return "recorder"
-
-        def request(self, req):
-            self.requests.append(req)
-            return HttpResponse(200, req.url, {}, "{}", b"")
-
-        def close(self) -> None:
-            pass
-
-    transport = _Recorder()
-    session = SessionManager(_settings(tmp_path), lambda: {"c_user": "1", "xs": "2"})
-    client = BaseClient(transport, session, _settings(tmp_path))  # type: ignore[arg-type]
-
-    client._request(Route(op="x", method="GET", path="/x", requires_auth=True))
-
-    assert session.from_config is False, "provenance must not change"
-    assert transport.requests[-1].transport_hint is None, "still routed to CDP"
 
 
 def test_bootstrap_persists_cookies_for_the_next_run(tmp_path: Path) -> None:

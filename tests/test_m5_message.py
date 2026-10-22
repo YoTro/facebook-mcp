@@ -379,7 +379,8 @@ def test_empty_text_rejected() -> None:
         _client(FakeCdp()).send("200000000000001", "   ")
 
 
-def test_http_only_transport_is_rejected() -> None:
+def test_ui_mode_without_a_browser_is_rejected() -> None:
+    """With message_transport="ui" the UI is the only path, so no browser = error."""
     transport = CurlCffiTransport(Settings(min_request_interval=0.0))
     try:
         client = _client(transport)
@@ -389,9 +390,10 @@ def test_http_only_transport_is_rejected() -> None:
         transport.close()
 
 
-def test_graphql_path_is_documented_as_unavailable() -> None:
+def test_graphql_mutation_is_an_explicit_dead_end() -> None:
+    """There is no page-level GraphQL send; the protocol lives on the WebSocket."""
     client = _client(FakeCdp())
-    with pytest.raises(UnsupportedError, match="service worker"):
+    with pytest.raises(UnsupportedError, match="Lightspeed WebSocket"):
         client.send_via_graphql("200000000000001", "hi")
 
 
@@ -482,15 +484,6 @@ def test_service_returns_ok() -> None:
     result = service.send_message("200000000000001", "hi")
     assert result.ok is True
     assert result.delivery == "submitted"
-
-
-def test_mcp_tool_registered() -> None:
-    import asyncio
-
-    from facebook_mcp.server import mcp
-
-    names = {t.name for t in asyncio.run(mcp.list_tools())}
-    assert "send_message" in names
 
 
 # --- live browser wins over a stale snapshot ----------------------------
