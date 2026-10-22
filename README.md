@@ -183,7 +183,7 @@ GraphQL `doc_id`s and `variables` templates change. Re-capture them:
 ```bash
 make install     # .venv (Python 3.11) + dev dependencies
 make hooks       # commit-msg hook + commit template
-make check       # everything CI runs: lint, format, layers, tests, MCP smoke
+make check       # main local checks: lint, format, layers, docs, tests, smoke
 ```
 
 | Target | What it does |
@@ -192,11 +192,12 @@ make check       # everything CI runs: lint, format, layers, tests, MCP smoke
 | `make fmt` | `ruff format` (rewrites) |
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
-| `make test` | `pytest -q` (268 tests, fully offline) |
+| `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
+| `make test` | `pytest -q` (273 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |
-| `make check` | all of the above |
+| `make check` | lint + fmt-check + layers + docs + test + smoke (CI also runs the commit-message check, the credential guard and the wheel build) |
 
 ### CI (`.github/workflows/ci.yml`)
 

@@ -102,6 +102,25 @@
 4. 跨层传递**领域数据**时使用 `core/models` 中的 pydantic 模型;
    **协议原始载荷**(GraphQL JSON、HTML)在 client 内部以 `dict` 处理,不强行建模。
 
+### 依赖注入(与代码一致)
+
+跨层协作者全部**构造函数注入**,没有模块级单例;`services/factory.py` 是唯一装配点:
+
+```
+Services(settings)                       # get_services(account) 按账号缓存整张图
+  ├─ get_transport(settings) ──────────→ CurlCffiTransport / CdpTransport / HybridTransport
+  ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
+  ├─ ProfileClient(transport, session, settings)
+  ├─ SearchClient(transport, session, settings)
+  ├─ MessageClient(transport, session, settings, profile_client)   # 复用 profile 解析用户名
+  ├─ PostService(profile_client)
+  ├─ SearchService(search_client)
+  └─ MessageService(message_client)
+```
+
+因此测试可以替换任意一层(`FakeCdp`、`_RecordingTransport`、stub `ProfileClient`),
+client 之间也从不互相 `new`;`BaseClient` 只持有 `transport` / `session` / `settings` 三个依赖。
+
 ---
 
 ## 4. 目录结构(实际)
@@ -180,7 +199,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 268 项测试(全部离线)
+└── tests/                           # 273 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -396,7 +415,9 @@ class Transport(Protocol):
   - **`SendResult.delivery` 区分三种状态**:`not_sent`(什么都没提交,可安全重试)、
     `submitted`(已交给 Messenger,但 Web UI 拿不到服务端回执,重试可能重复)、
     `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本)。
-    后两种对应 `SendUncertainError`,不再伪装成普通失败
+    只有 `unknown` 走 `SendUncertainError`(此时 `ok=False`);`submitted` 是**成功返回**
+    (`ok=True`)。`MessageService` 先捕获 `SendUncertainError` → `unknown`,
+    其余 `FacebookError` → `not_sent`,所以点击前的失败绝不会被标成结果未知
   - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
 
 ### 5.6 L4 services
@@ -453,7 +474,8 @@ class Transport(Protocol):
 | 2 | `~/.facebook-mcp/accounts/<FB_ACCOUNT>/cookies.txt` | **默认**,隔离且可持久 |
 | 3 | `FB_COOKIE` | 内联字符串;会出现在 `ps` / shell 历史中,仅作兜底 |
 
-前两项属于「全局凭据」,只对 `FB_ACCOUNT` 指定账号有效:
+其中 `FB_COOKIE_FILE` 与 `FB_COOKIE` 是**全局凭据**(第 2 项账户库本身就按账号隔离),
+它们只对 `FB_ACCOUNT` 指定的账号有效:
 `build_settings(account="work")` 会**丢弃** `FB_COOKIE` / `FB_COOKIE_FILE`,
 让 `work` 只能用自己的账户库(否则 cookie 文件优先级更高,跨账号调用会静默换成
 另一个身份,账号目录隔离形同虚设)。
@@ -608,7 +630,8 @@ server.send_message(recipient="exampleuser", text="...")
 ## 7. 异常体系
 
 ```
-FacebookError                    core/exceptions.py —— 所有项目异常的基类
+FacebookError                    基类,定义在 core/exceptions.py
+                                 (下列各类除 CdpError 外都在该文件)
 ├── AuthError                    登录态缺失/失效(fb_dtsg 失效、被要求登录)
 ├── RateLimitError               频率限制(可带 retry_after)
 ├── ChallengeError               验证码/风控检查 —— 已定义,当前代码路径未触发
@@ -616,7 +639,8 @@ FacebookError                    core/exceptions.py —— 所有项目异常的
 ├── TransportError               传输层失败
 │   ├── HttpStatusError          非 2xx(4xx/5xx,不含 404/403/401/429)
 │   ├── ParseError               响应结构变化、GraphQL errors、模板过期
-│   └── CdpError                 transport/cdp.py —— DevTools 协议调用失败
+│   └── CdpError                 **定义在 transport/cdp.py**(唯一不在 core),
+│                                 DevTools 协议调用失败
 ├── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
 └── SendUncertainError           已点击发送但结果无法观测 —— 调用方不得盲目重试
 
@@ -638,14 +662,18 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 | 响应体 | 不是 JSON(如 `for (;;);` 后仍是 HTML) | `ParseError`,提示 `doc_id` 可能已轮换 |
 | 旧式信封 | `{"error": <code>, "errorSummary": ...}`(无 `errors`) | `ParseError`;`1357031`(content no longer available)会点名 `doc_id` 已轮换 |
 
-**对 MCP 的表现**(各工具并不一致,按实际实现):
+**对 MCP 的表现**(各工具并不一致,按实际实现)。
+不对称是**有意的**:`get_user_latest_post_time` 返回单个时间,
+「没有时间」必须有地方表达,所以走结构化 `ok=False`;列表类工具返回 `list`,
+空列表本身已是合法结果,再用 `ok=False` 只会把「没发过帖」和「解析失败」混在一起,
+因此它们抛异常,由 SDK 转成 `isError`:
 
 | 工具 | 失败时 |
 |---|---|
 | `get_user_latest_post_time` | **不抛异常**,返回 `PostTimeResult(ok=False, error=...)`(解析不到主页/无帖子都走这里) |
 | `get_user_recent_posts` | 抛异常 → SDK 转成 `isError` |
 | `search_people` / `search_pages` | 抛异常 → SDK 转成 `isError` |
-| `send_message` | `MessageService` 捕获 → `SendResult(ok=False, error=...)` |
+| `send_message` | `MessageService` 捕获 → `SendResult(ok=False, delivery="not_sent" 或 "unknown", error=...)` |
 
 ---
 
@@ -850,7 +878,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(268 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(273 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -890,12 +918,12 @@ MCP 层只做转发,不含业务逻辑。
 ### M5 交付明细
 
 - `clients/message_client.py`:收件人解析、线程导航(含回退)、会话校验、输入校验、发送、送达状态
-- `services/message_service.py`:异常 → `SendResult(ok=False, error=...)`
+- `services/message_service.py`:异常 → `SendResult(ok=False, delivery=..., error=...)`
 - 逆向证据与备选方案见 §8.3;`send_via_graphql()` 为保留入口,当前显式 `UnsupportedError`
 
 ### M6 交付明细
 
-- 测试:268 项,覆盖 16 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:273 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
@@ -971,7 +999,7 @@ MCP 层只做转发,不含业务逻辑。
 **本地等价**:
 
 ```bash
-make check     # lint + fmt-check + layers + test + smoke
+make check     # lint + fmt-check + layers + docs + test + smoke
 ```
 
 **代码规范**:`ruff`(line-length 100,target py311),规则集

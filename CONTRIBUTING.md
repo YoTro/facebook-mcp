@@ -53,51 +53,9 @@ languages at the same place.
 
 The code blocks, tables and paths inside them are generated from the real
 implementation, so update them when the implementation changes rather than
-rewriting prose around stale details.
-
-## Deploy keys
-
-CI does not need a deploy key for this repository — `actions/checkout` uses the
-built-in `GITHUB_TOKEN`. A deploy key is only needed when a workflow must reach
-**another** repository, or when an external service has to clone this one.
-
-This project's key convention:
-
-```
-~/.ssh/github-action-key-facebook-mcp        # private, 0600, ed25519, no passphrase
-~/.ssh/github-action-key-facebook-mcp.pub    # public, paste into GitHub
-```
-
-Generate one per machine:
-
-```bash
-ssh-keygen -t ed25519 -a 100 -C "github-action-key-facebook-mcp" \
-    -f ~/.ssh/github-action-key-facebook-mcp -N ""
-chmod 600 ~/.ssh/github-action-key-facebook-mcp
-```
-
-Add the public key under **Settings → Deploy keys** (tick *Allow write access*
-only if the consumer must push). With the `gh` CLI:
-
-```bash
-gh repo deploy-key add ~/.ssh/github-action-key-facebook-mcp.pub \
-    --title "github-action-key-facebook-mcp"
-```
-
-Store the private key as a repository secret without echoing it:
-
-```bash
-gh secret set SSH_DEPLOY_KEY < ~/.ssh/github-action-key-facebook-mcp
-```
-
-Rules:
-
-- always **ed25519**, never RSA;
-- no passphrase (a CI runner cannot type one) — so treat the private key as a
-  credential: `0600`, never in the repo, never in a log or screenshot;
-- one key per machine, so a compromised runner can be revoked on its own;
-- a deploy key is bound to a single repository; needing several means a GitHub
-  App or a separate key per repo.
+rewriting prose around stale details. `make docs` checks the structural parity
+(section numbering, bullets, tables, code blocks) and runs as part of
+`make check`.
 
 ## Commit messages
 

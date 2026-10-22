@@ -65,8 +65,7 @@ All usernames, page names and ids in this repository are placeholders
 ┌──────────────────────────────────────────────────────────────────┐
 │ L4  services/          Use-case orchestration                     │
 │     post_service / search_service / message_service               │
-│     factory.py — composition root (the only place that wires      │
-│                  transport / session / clients)                   │
+│     factory.py — composition root: wires transport/session/clients│
 └───────────────────────────────┬──────────────────────────────────┘
                                 ↓ depends on core + clients only
 ┌──────────────────────────────────────────────────────────────────┐
@@ -157,7 +156,8 @@ facebook-mcp/
 │   │   ├── http.py                  #   CurlCffiTransport
 │   │   ├── cdp.py                   #   CdpTransport (WebSocket → DevTools)
 │   │   ├── proxy.py                 #   explicit → env → macOS system proxy
-│   │   ├── browsing.py              #   cdp_from(): does this transport drive a browser?
+│   │   ├── browsing.py              #   BrowserTransport protocol + cdp_from()
+│   │   ├── throttle.py              #   RateLimiter: per account, shared by HTTP/CDP/UI
 │   │   └── factory.py               #   get_transport() + HybridTransport
 │   │
 │   ├── session/                     # L2 session layer
@@ -195,7 +195,7 @@ facebook-mcp/
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 268 tests (all offline)
+└── tests/                           # 273 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -217,6 +217,27 @@ facebook-mcp/
 ```
 
 ---
+
+### Dependency injection (as implemented)
+
+Every cross-layer collaborator is **constructor-injected**; there are no module-level
+singletons, and `services/factory.py` is the only assembly point:
+
+```
+Services(settings)                       # get_services(account) caches one graph per account
+  ├─ get_transport(settings) ──────────→ CurlCffiTransport / CdpTransport / HybridTransport
+  ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
+  ├─ ProfileClient(transport, session, settings)
+  ├─ SearchClient(transport, session, settings)
+  ├─ MessageClient(transport, session, settings, profile_client)   # reuses username resolution
+  ├─ PostService(profile_client)
+  ├─ SearchService(search_client)
+  └─ MessageService(message_client)
+```
+
+Tests can therefore replace any single layer (`FakeCdp`, `_RecordingTransport`, a stub
+`ProfileClient`), clients never instantiate each other, and `BaseClient` holds only
+`transport` / `session` / `settings`.
 
 ## 5. Module responsibilities
 
@@ -516,6 +537,11 @@ directory, one directory per account:
 | 2 | `~/.facebook-mcp/accounts/<FB_ACCOUNT>/cookies.txt` | **default**, isolated and persistent |
 | 3 | `FB_COOKIE` | inline string; shows up in `ps` and shell history — last resort only |
 
+`FB_COOKIE_FILE` and `FB_COOKIE` are the *global* credentials (row 2 is already
+per-account), and they belong to the `FB_ACCOUNT` identity: `build_settings(account="work")`
+drops them, so `work` can only use its own account store. Otherwise a cookie file
+outranks the store and a cross-account call silently borrows the other identity.
+
 With no source at all the server runs anonymously (public pages only).
 
 **Per-account overrides supported by `account.json`**:
@@ -655,13 +681,15 @@ server.send_message(recipient="exampleuser", text="...")
       → resolve_recipient(): username → uid (needs ProfileClient)
       → cdp_from(transport)                                # must be a browser transport
       → navigate  https://www.facebook.com/messages/t/<uid>/
-      → wait for the composer; otherwise click the thread-list row
+      → wait for the composer; otherwise click the row with the exact thread id
       → otherwise abort when the session acts as a Page (it cannot start a chat, §5.5)
       → otherwise open the profile and click "Message"
+      → verify it: thread id == uid, or "Write to <name>" == recipient name
+        (a mismatch refuses to send: nothing was sent)
       → Input.insertText → verify the composer received it
       → click "Press enter to send" (fallback: Enter key)
       → poll until the composer is empty
-  → SendResult(ok=True, thread_id=...)
+  → SendResult(ok=True, delivery="submitted", thread_id=...)
 ```
 
 > There is no GraphQL here: the send is issued by Facebook's service worker.
@@ -672,7 +700,8 @@ server.send_message(recipient="exampleuser", text="...")
 ## 7. Exception hierarchy
 
 ```
-FacebookError                    core/exceptions.py — base class for every error
+FacebookError                    base class, defined in core/exceptions.py
+                                 (every class below lives there except CdpError)
 ├── AuthError                    session missing/expired (fb_dtsg invalid, login demanded)
 ├── RateLimitError               rate limited (may carry retry_after)
 ├── ChallengeError               captcha / risk check — defined, never raised today
@@ -680,13 +709,12 @@ FacebookError                    core/exceptions.py — base class for every err
 ├── TransportError               transport failure
 │   ├── HttpStatusError          non-2xx (4xx/5xx, excluding 404/403/401/429)
 │   ├── ParseError               response shape changed, GraphQL errors, stale template
-│   └── CdpError                 transport/cdp.py — a DevTools protocol call failed
-└── UnsupportedError             this **transport or account type** cannot perform
-                                 the operation (messaging without a browser,
-                                 starting a chat as a Page)
+│   └── CdpError                 **defined in transport/cdp.py** (the only one
+│                                 outside core) — a DevTools protocol call failed
+├── UnsupportedError             transport/account lacks it (no browser, Page chat)
+└── SendUncertainError           send clicked, outcome unknown — do not blind-retry
 
-TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt template
-                                  or unsupported category
+TemplateError (routes/templates) — RuntimeError: missing/corrupt/unsupported
 ```
 
 **Translation rules**
@@ -711,7 +739,7 @@ TemplateError (routes/templates) — RuntimeError subclass: missing/corrupt temp
 | `get_user_latest_post_time` | does **not** raise; returns `PostTimeResult(ok=False, error=...)` |
 | `get_user_recent_posts` | raises → the SDK reports `isError` |
 | `search_people` / `search_pages` | raises → `isError` |
-| `send_message` | caught by `MessageService` → `SendResult(ok=False, error=...)` |
+| `send_message` | caught by `MessageService` → `SendResult(ok=False, delivery="not_sent" or "unknown", error=...)` |
 
 ---
 
@@ -939,7 +967,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (268), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (273), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -987,7 +1015,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 268 across 16 files (including a CDP integration test against a mock DevTools server)
+- Tests: 273 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
@@ -1069,7 +1097,7 @@ real `~/.facebook-mcp`.
 **Local equivalent**:
 
 ```bash
-make check     # lint + fmt-check + layers + test + smoke
+make check     # lint + fmt-check + layers + docs + test + smoke
 ```
 
 **Code style**: `ruff` (line-length 100, target py311) with

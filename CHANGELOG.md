@@ -173,6 +173,19 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   `Transport` is the only contract, and `make check` is described as the main
   local checks rather than "equivalent to CI".
 
+- `ARCHITECTURE.md` / `ARCHITECTURE.en.md` audited again: the English §6.3 lost the
+  conversation-verification and `delivery` steps when an earlier edit batch was
+  applied to one side only, the exception tree now says `CdpError` is defined in
+  `transport/cdp.py` (the only one outside `core`), "the first two are global
+  credentials" no longer miscounts the per-account store, and only `unknown`
+  (not `submitted`) is described as coming from `SendUncertainError`.
+- The `get_user_latest_post_time` vs `get_user_recent_posts` asymmetry (structured
+  `ok=False` vs raising) is now explained instead of only tabulated, and §3 has a
+  dependency-injection diagram showing how `services/factory.py` wires the graph.
+- `CONTRIBUTING.md` dropped the deploy-key tutorial: it is maintainer/machine
+  setup, not a contributor rule; README keeps the one fact that matters (CI uses
+  `GITHUB_TOKEN` and needs no deploy key).
+
 ### Planned
 
 - Capture the Messenger send mutation (service-worker / Lightspeed) and replace
