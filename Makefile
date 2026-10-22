@@ -4,7 +4,7 @@ BOOTSTRAP_PYTHON ?= python3.11
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install hooks lint fmt fmt-check layers test test-commits smoke check build clean \
+.PHONY: help install hooks lint fmt fmt-check layers docs test test-commits smoke check build clean \
         chrome chrome-stop accounts
 
 help: ## show this help
@@ -50,7 +50,10 @@ test-commits: ## validate commit messages on the current branch
 smoke: ## MCP stdio handshake + tools/list
 	$(PY) tools/smoke_mcp.py
 
-check: lint fmt-check layers test smoke ## main local checks (CI also runs commit messages, the credential guard and the wheel build)
+docs: ## CN/EN architecture documents stay structurally in sync
+	$(PY) tools/check_docs.py
+
+check: lint fmt-check layers docs test smoke ## main local checks (CI also runs commit messages, the credential guard and the wheel build)
 
 build: ## build sdist + wheel
 	$(PY) -m build

@@ -48,6 +48,9 @@ jobs:
       - name: Layered import rules
         run: python tools/check_layers.py
 
+      - name: Documentation parity (CN/EN)
+        run: python tools/check_docs.py
+
       - name: Commit message convention
         if: github.event_name == 'pull_request'
         env:

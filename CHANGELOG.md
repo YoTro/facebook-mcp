@@ -186,6 +186,11 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   setup, not a contributor rule; README keeps the one fact that matters (CI uses
   `GITHUB_TOKEN` and needs no deploy key).
 
+- `tools/check_docs.py` (`make docs`, also in `make check` and CI) asserts that
+  `ARCHITECTURE.md` and `ARCHITECTURE.en.md` keep the same section numbering,
+  bullet count, table rows and fenced-code shape. It exists because a one-sided
+  edit landed twice; `tests/test_check_docs.py` proves it fails on exactly that.
+
 ### Planned
 
 - Capture the Messenger send mutation (service-worker / Lightspeed) and replace
