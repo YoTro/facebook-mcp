@@ -103,13 +103,28 @@ class SearchClient(BaseClient):
 
 
 def _category_for(profile: dict[str, Any], *, fallback: SearchCategory) -> SearchCategory:
-    """Infer the entity kind from ``__typename`` / page-specific fields."""
+    """Infer the entity kind from ``__typename`` / page-specific fields.
+
+    A ``User`` without any page metadata is a person — in *every* tab, so it is
+    never reported as a Page. Facebook also returns real pages with
+    ``__typename="User"`` in some surfaces; those always carry category fields.
+    Unknown typenames keep the tab's ``fallback``.
+    """
     typename = str(profile.get("__typename") or "")
     if typename in ("Page", "PageProfile"):
         return SearchCategory.PAGES
-    if typename == "User" and not profile.get("category_name") and not profile.get("category"):
-        return SearchCategory.PEOPLE if fallback is SearchCategory.PEOPLE else fallback
+    if typename == "User":
+        return SearchCategory.PAGES if _has_page_metadata(profile) else SearchCategory.PEOPLE
     return fallback
+
+
+def _has_page_metadata(profile: dict[str, Any]) -> bool:
+    """Whether a ``User``-typed node carries page-only fields."""
+    for key in ("category_name", "category", "short_category_name"):
+        value = profile.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _subtitle(profile: dict[str, Any]) -> str | None:

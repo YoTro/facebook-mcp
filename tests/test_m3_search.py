@@ -89,11 +89,63 @@ def test_template_does_not_leak_between_calls() -> None:
 
 def test_parse_results_pages(payload: dict[str, Any]) -> None:
     results = SearchClient._parse_results(payload, SearchCategory.PAGES)
-    ids = [r.id for r in results]
-    # The Page entity is kept, the duplicate is dropped, malformed nodes skipped.
-    assert "987654321" in ids
-    assert ids.count("100000000000010") == 1
-    assert "555000111" in ids
+    # Page-typed nodes are kept; User-typed people are dropped even though
+    # Facebook returns them in this tab; duplicates and malformed nodes skipped.
+    assert [r.id for r in results] == ["987654321"]
+
+
+def test_user_typed_page_in_page_search_is_kept() -> None:
+    """Some surfaces return real pages as __typename="User" + category fields."""
+    payload = {
+        "data": {
+            "serpResponse": {
+                "results": {
+                    "edges": [
+                        {
+                            "rendering_strategy": {
+                                "view_model": {
+                                    "profile": {
+                                        "id": "42",
+                                        "name": "Some Page",
+                                        "__typename": "User",
+                                        "category_name": "Pest Control Service",
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    results = SearchClient._parse_results(payload, SearchCategory.PAGES)
+    assert [r.id for r in results] == ["42"]
+
+
+def test_people_search_keeps_user_typed_entries() -> None:
+    payload = {
+        "data": {
+            "serpResponse": {
+                "results": {
+                    "edges": [
+                        {
+                            "rendering_strategy": {
+                                "view_model": {
+                                    "profile": {
+                                        "id": "7",
+                                        "name": "A Person",
+                                        "__typename": "User",
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    results = SearchClient._parse_results(payload, SearchCategory.PEOPLE)
+    assert [r.id for r in results] == ["7"]
 
 
 def test_parse_results_keeps_pages_in_page_search(payload: dict[str, Any]) -> None:
@@ -179,7 +231,8 @@ def test_search_posts_expected_form(payload: dict[str, Any]) -> None:
 
 def test_search_respects_limit(payload: dict[str, Any]) -> None:
     client, _ = _search_client(payload)
-    results = client.search("pest control", SearchCategory.PAGES, 2)
+    # The people tab keeps both User-typed nodes; the pages tab only has one.
+    results = client.search("pest control", SearchCategory.PEOPLE, 2)
     assert len(results) == 2
 
 
