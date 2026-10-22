@@ -18,6 +18,7 @@ from ..clients.profile_client import ProfileClient
 from ..clients.search_client import SearchClient
 from ..core.accounts import AccountPaths
 from ..core.config import Settings, get_settings
+from ..core.logger import get_logger
 from ..session.manager import SessionManager
 from ..transport.base import Transport
 from ..transport.cdp import CdpTransport
@@ -25,6 +26,8 @@ from ..transport.factory import HybridTransport, get_transport
 from .message_service import MessageService
 from .post_service import PostService
 from .search_service import SearchService
+
+logger = get_logger(__name__)
 
 
 def build_settings(account: str | None = None) -> Settings:
@@ -37,7 +40,19 @@ def build_settings(account: str | None = None) -> Settings:
     """
     base = get_settings()
     if account and account != base.account:
-        base = base.model_copy(update={"account": account})
+        # Global FB_COOKIE / FB_COOKIE_FILE describe the identity of FB_ACCOUNT,
+        # not of every account. Letting them through would make account="work"
+        # act as whoever owns the global jar, and because a cookie file outranks
+        # the account store (session/manager.py) the "isolation" of the account
+        # directory would not match the identity actually in use.
+        if base.cookie or base.cookie_file:
+            logger.warning(
+                "account %r: ignoring the global FB_COOKIE / FB_COOKIE_FILE "
+                "(they belong to account %r); use its own account store instead",
+                account,
+                base.account,
+            )
+        base = base.model_copy(update={"account": account, "cookie": None, "cookie_file": None})
 
     paths = AccountPaths.for_account(base.account, base.home)
     meta = paths.load_meta()

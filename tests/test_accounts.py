@@ -261,3 +261,52 @@ def test_account_argument_reaches_the_service(
     result = server.get_user_latest_post_time("someone", account="work")
     assert result.ok is True
     assert seen == ["someone"]
+
+
+def test_global_credentials_do_not_leak_into_another_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``account="work"`` must not silently borrow the global identity.
+
+    FB_COOKIE / FB_COOKIE_FILE describe whoever FB_ACCOUNT points at, and a
+    cookie file outranks the account store — inheriting them would make the
+    "isolated" account directory a lie.
+    """
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    monkeypatch.setenv("FB_ACCOUNT", "default")
+    monkeypatch.setenv("FB_COOKIE_FILE", str(tmp_path / "default-only.txt"))
+    monkeypatch.setenv("FB_COOKIE", "c_user=1; xs=2")
+
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    assert factory.build_settings(None).cookie_file == str(tmp_path / "default-only.txt")
+    assert factory.build_settings("default").cookie == "c_user=1; xs=2"
+
+    work = factory.build_settings("work")
+    assert work.account == "work"
+    assert work.cookie is None
+    assert work.cookie_file is None
+    assert work.account_paths().name == "work"
+
+
+def test_another_account_uses_its_own_cookie_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    monkeypatch.setenv("FB_ACCOUNT", "default")
+    monkeypatch.setenv("FB_COOKIE_FILE", str(tmp_path / "default-only.txt"))
+
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    paths = AccountPaths.for_account("work", tmp_path).ensure()
+    paths.cookies_file.write_text(NETSCAPE.replace("123", "222"), encoding="utf-8")
+
+    settings = factory.build_settings("work")
+    session = SessionManager(settings)
+    assert session.state.user_id == "222"
