@@ -86,13 +86,15 @@ def search_pages(q: str, limit: int = 10, account: str | None = None) -> list[Se
 @mcp.tool(
     description=(
         "Send a Messenger message to a user or page. 'recipient' accepts a "
-        "numeric uid, a username/vanity, or a profile URL. Requires a "
-        "logged-in browser (FB_TRANSPORT_MODE=auto or cdp). The result reports "
-        "'delivery': 'not_sent' (nothing was submitted, safe to retry), "
-        "'submitted' (handed to Messenger; no server acknowledgement is readable, "
-        "so a retry may duplicate), 'rejected' (Messenger marked it unsent, so it "
-        "never arrived and a retry is safe), or 'unknown' (send was issued but "
-        "could not be verified — check the conversation first). " + _ACCOUNT_DOC
+        "numeric uid, a username/vanity, or a profile URL. Sends over the "
+        "Messenger sync WebSocket, so no browser is needed (a CDP-driven UI path "
+        "is only a fallback). 'delivery' reports: 'not_sent' (nothing was "
+        "submitted, safe to retry), 'submitted' (Messenger accepted it — the "
+        "WebSocket path also returns the server's message_id; the UI fallback "
+        "only sees the composer clear, so a retry may duplicate), 'rejected' (the "
+        "gateway explicitly refused it, so it never arrived and a retry is safe), "
+        "or 'unknown' (send was issued but could not be verified — check the "
+        "conversation first). " + _ACCOUNT_DOC
     )
 )
 def send_message(recipient: str, text: str, account: str | None = None) -> SendResult:

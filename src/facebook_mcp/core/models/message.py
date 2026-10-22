@@ -9,16 +9,23 @@ from pydantic import BaseModel, Field
 DeliveryState = Literal["not_sent", "submitted", "rejected", "unknown"]
 """What is known about a send attempt.
 
+Two paths can deliver a message: the Lightspeed WebSocket (default) and the
+CDP-driven UI (fallback). They can observe different amounts, so the state says
+what is *known*, not which path ran.
+
 * ``not_sent`` — nothing reached Messenger (validation, wrong conversation,
-  composer missing/draft/rejected the text). Safe to retry.
-* ``submitted`` — the composer accepted the text and cleared it, i.e. the
-  message was handed to Messenger. No server acknowledgement is readable from
-  the web UI, so retrying may duplicate it.
-* ``rejected`` — Messenger itself marked the message as unsent ("Couldn't
-  send"), so it never reached the recipient. Retrying is safe, though it will
-  probably fail the same way.
-* ``unknown`` — send was clicked but the outcome could not be observed (the
-  composer vanished or still holds text). Check the conversation first.
+  composer missing/draft, or the channel refused before the frame was written).
+  Safe to retry.
+* ``submitted`` — Messenger accepted the message. Over the WebSocket the server's
+  ``message_id`` comes back with it; over the UI fallback only the composer
+  clearing is observable, so a retry may duplicate.
+* ``rejected`` — the gateway explicitly marked it unsent
+  (``markOptimisticMessageFailed``), so it never reached the recipient. Retrying
+  is safe, though it will probably fail the same way. The UI fallback never
+  claims this: the DOM cannot prove a marker belongs to our message.
+* ``unknown`` — the send was issued but the outcome could not be observed (a lost
+  reply, a dropped stream, a vanished composer, or an ambiguous UI failure
+  marker). Check the conversation before resending.
 """
 
 
@@ -29,13 +36,16 @@ class SendResult(BaseModel):
     delivery: DeliveryState = Field(
         ...,
         description=(
-            "'not_sent' = nothing was submitted (safe to retry); 'submitted' = the "
-            "composer accepted and cleared the text, but no server acknowledgement is "
-            "readable (retrying may duplicate); 'rejected' = Messenger marked it as "
-            "unsent, so it never arrived (safe to retry); 'unknown' = send was issued "
-            "and the outcome could not be verified"
+            "'not_sent' = nothing was submitted (safe to retry); 'submitted' = "
+            "Messenger accepted it — the WebSocket path also returns the server's "
+            "message_id, while the UI fallback only sees the composer clear, so a "
+            "retry may duplicate; 'rejected' = the gateway explicitly refused it, so "
+            "it never arrived (safe to retry); 'unknown' = the send was issued and the "
+            "outcome could not be observed — check the conversation before resending"
         ),
     )
     thread_id: str | None = Field(None, description="Messenger thread id")
-    message_id: str | None = Field(None, description="Sent message id")
+    message_id: str | None = Field(
+        None, description="Server message id (available on the WebSocket path)"
+    )
     error: str | None = Field(None, description="Error message when ok=False")

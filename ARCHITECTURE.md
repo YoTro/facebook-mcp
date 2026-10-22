@@ -206,7 +206,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 344 项测试(全部离线)
+└── tests/                           # 355 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -642,7 +642,7 @@ server.send_message(recipient="exampleuser", text="...")
           → LightspeedSender.send():require_auth → 共享限速器 → 连接 gateway
           → task 46 → 读回执
               replaceOptimsiticMessage + mid → submitted + message_id
-              markOptimisticMessageFailed   → rejected(不自动重发)
+              markOptimisticMessageFailed   → rejected;auto 模式再用 UI 探一次
               无回执/连接中断               → unknown(禁止自动重发)
       → 回退路径(FB_MESSAGE_TRANSPORT=ui,或通道不可用)
           → CDP:打开会话 → 校验收件人 → 输入 → 点击 → 判定(不会报 rejected)
@@ -651,6 +651,10 @@ server.send_message(recipient="exampleuser", text="...")
 
 > 之所以保留 UI 路径:它能**新建**会话(协议通道只能往已有 thread key 发),
 > 也是唯一能区分"该线程需要 UI"与"对方关闭了私信"的手段。
+>
+> **拒绝后的策略**:网关明确拒绝 = 服务器说"没发出去",因此 `auto` 模式会再用 UI
+> 探一次(不会重复投递),`lightspeed` 模式直接失败。丢回执/连接中断属于 `unknown`,
+> **任何模式都不会自动重发**。
 
 ---
 
@@ -943,7 +947,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(344 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(355 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -988,7 +992,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:344 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:355 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

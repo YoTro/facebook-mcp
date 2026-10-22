@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import os
 import sys
@@ -45,6 +46,10 @@ from facebook_mcp.services.factory import build_settings
 from facebook_mcp.transport.cdp import CdpTransport
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Distinguishes frames written in the same nanosecond bucket (same length, same
+# direction) so a capture never overwrites itself.
+_FRAME_COUNTER = itertools.count(1)
 PACKAGE_TEMPLATES = REPO_ROOT / "src/facebook_mcp/routes/templates"
 
 # Only captured queries with a consumer in ``routes/templates/__init__.py`` are
@@ -248,9 +253,13 @@ def _record_websocket(
             raw = base64.b64decode(payload)
         except Exception:  # noqa: BLE001 - malformed frame
             raw = b""
-        directory.mkdir(parents=True, exist_ok=True)
-        name = f"{int(time.time() * 1000)}-{direction}-{len(raw)}.bin"
-        (directory / name).write_bytes(raw)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Two equal-length frames can land in the same millisecond; a counter keeps
+        # them apart, and the file is private because frames carry session ids.
+        name = f"{time.time_ns()}-{next(_FRAME_COUNTER):05d}-{direction}-{len(raw)}.bin"
+        target = directory / name
+        target.write_bytes(raw)
+        target.chmod(0o600)
         detail = raw[:64].hex(" ")
         text = raw[16:].decode("utf-8", "replace") if len(raw) > 16 else ""
         frames.append(

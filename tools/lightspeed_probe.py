@@ -11,12 +11,12 @@ inside a 16-byte binary header that ``facebook_mcp.transport.lightspeed`` now
 encodes byte-for-byte (see ``tests/test_lightspeed.py``). Auth is cookie-based
 (``x-dgw-authtype=1:0``), so a plain Python WebSocket can reach the same stream.
 
-Status: the channel, the framing and the task envelope are confirmed against a
-live send. The server currently answers a replayed send with
-``markOptimisticMessageFailed / "Couldn't send."``, so one piece of session state
-is still missing (most likely ``version_id``: the queue sync version, which a
-fresh connection cannot invent). Keep this tool for that investigation; it is
-*not* wired into ``send_message``.
+Status: the protocol is implemented — ``clients/lightspeed_client.py`` is what
+``send_message`` uses, and this tool exists to poke at the channel by hand
+(``--dry-run`` prints the frame it would send). A refusal
+(``markOptimisticMessageFailed``) is *ambiguous*: the recipient may have
+messaging disabled, the thread type may need the UI path, or the thread may need
+context (``--warmup``).
 
 Usage::
 

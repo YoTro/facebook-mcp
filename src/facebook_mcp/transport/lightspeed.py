@@ -115,9 +115,9 @@ def build_send_body(
     """Build the JSON envelope for a text message.
 
     Field-for-field equivalent to what Messenger sends (``source`` 65537,
-    ``send_type`` 1, ``sync_group`` 1). ``version_id`` is the queue sync version
-    the server expects and must be captured from a live session — a fresh
-    connection cannot invent it.
+    ``send_type`` 1, ``sync_group`` 1). ``version_id`` identifies the client
+    build, not any queue state: it measured identical across threads and sessions,
+    so ``clients/lightspeed_client.py`` carries it as a constant.
     """
     message = {
         "thread_id": int(thread_id),
@@ -185,13 +185,13 @@ WARMUP_TASKS: tuple[tuple[str, str, str], ...] = (
     ("117", "insert_persistent_menu_items", "thread_key"),
     ("767", "fetch_custom_thread_commands", "thread_key"),
 )
-"""Thread-context fetches Messenger performs before it can send.
+"""Thread-context fetches Messenger performs before a send.
 
-Verified by replay: a connection that posts task 46 without these gets
-``markOptimisticMessageFailed / "Couldn't send."``; with them the server answers
-``replaceOptimsiticMessage`` and a real ``mid.$…``. They are ordinary fetches
-(menus, custom commands, contact profile questions), not session-bound
-subscriptions, so they can be constructed from the thread key alone.
+**Not a general precondition.** One thread (a page's own "Get started"
+conversation) refused a bare task 46 and accepted it after these; a public page
+conversation accepted the bare send, so the requirement is thread-specific.
+``LightspeedSender(warmup=True)`` opts in. They are ordinary fetches (menus,
+custom commands, contact profile questions) buildable from the thread key.
 """
 
 

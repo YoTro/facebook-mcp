@@ -224,7 +224,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 344 tests (all offline)
+└── tests/                           # 355 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -723,7 +723,7 @@ server.send_message(recipient="exampleuser", text="...")
           → LightspeedSender.send(): require_auth → shared limiter → connect
           → task 46 → read the verdict
               replaceOptimsiticMessage + mid → submitted + message_id
-              markOptimisticMessageFailed   → rejected (never auto-resent)
+              markOptimisticMessageFailed   → rejected; in auto mode the UI probes once
               no reply / dropped stream     → unknown (no automatic resend)
       → fallback path (FB_MESSAGE_TRANSPORT=ui, or channel unusable)
           → CDP: open thread → verify recipient → type → click → classify (no `rejected`)
@@ -733,6 +733,11 @@ server.send_message(recipient="exampleuser", text="...")
 > The UI path stays because only it can **start** a conversation (the socket only
 > posts to a known thread key), and because it is what distinguishes "this thread
 > needs the UI" from "this recipient has messaging turned off".
+>
+> **Rejection policy**: an explicit gateway refusal means the server said it was
+> *not* sent, so `auto` mode probes once through the UI (nothing can be duplicated)
+> while `lightspeed` mode fails outright. A lost reply or a dropped stream is
+> `unknown`, and **no mode** retries that automatically.
 
 ---
 
@@ -1050,7 +1055,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (344), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (355), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1098,7 +1103,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 344 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 355 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

@@ -490,3 +490,21 @@ def test_source_reports_where_the_cookies_came_from(tmp_path: Path) -> None:
 
     anonymous = SessionManager(_settings(tmp_path / "fourth"))
     assert anonymous.source == "none"
+
+
+def test_a_persisted_jar_stays_refreshable_after_a_restart(tmp_path: Path) -> None:
+    """The store remembers it came from the browser, so a restart can refresh it."""
+    bootstrap = SessionManager(_settings(tmp_path), lambda: {"c_user": "7", "xs": "tok"})
+    bootstrap.require_auth()
+    assert bootstrap.source == "bootstrap"
+
+    # New process: loads the same file, but the provenance is not lost.
+    reopened = SessionManager(_settings(tmp_path), lambda: {"c_user": "8", "xs": "fresh"})
+    assert reopened.source == "bootstrap", "the bootstrap origin was forgotten"
+
+    reopened.invalidate("HTTP 403")
+    assert not AccountPaths.for_account("default", tmp_path).cookies_file.exists()
+
+    # … and it re-bootstraps instead of replaying the dead cookie.
+    assert reopened.require_auth().user_id == "8"
+    assert reopened.source == "bootstrap"

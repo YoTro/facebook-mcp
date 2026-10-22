@@ -291,19 +291,133 @@ def test_proxy_configuration_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> No
     assert options["proxy_type"] == "http"
 
 
-def test_socks_proxy_without_pysocks_is_reported() -> None:
+def test_socks_proxy_needs_python_socks() -> None:
+    """websocket-client talks SOCKS through python-socks, not PySocks."""
     sender, _ = _sender(ACCEPT)
     sender._settings = Settings(proxy="socks5h://127.0.0.1:1080")
     try:
-        import socks  # noqa: F401
+        import python_socks  # noqa: F401
     except ImportError:
-        with pytest.raises(LightspeedError, match="PySocks"):
+        with pytest.raises(LightspeedError, match="python-socks"):
             sender._proxy_options()
-    else:  # pragma: no cover - only when PySocks is installed
-        assert sender._proxy_options()["proxy_type"] == "socks5"
+    else:  # pragma: no cover - only when python-socks is installed
+        # The scheme travels verbatim: socks5h resolves names at the proxy.
+        assert sender._proxy_options()["proxy_type"] == "socks5h"
+
+
+def test_proxy_credentials_are_forwarded() -> None:
+    sender, _ = _sender(ACCEPT)
+    sender._settings = Settings(proxy="http://user:p%40ss@127.0.0.1:3128")
+    options = sender._proxy_options()
+    assert options["http_proxy_host"] == "127.0.0.1"
+    assert options["http_proxy_port"] == 3128
+    assert options["http_proxy_auth"] == ("user", "p@ss")
+
+
+def test_http_proxy_scheme_is_kept() -> None:
+    sender, _ = _sender(ACCEPT)
+    sender._settings = Settings(proxy="https://127.0.0.1:8443")
+    assert sender._proxy_options()["proxy_type"] == "https"
 
 
 def test_user_agent_override_is_used() -> None:
     sender, _ = _sender(ACCEPT)
     sender._settings = Settings(user_agent="custom-agent/1")
     assert (sender._settings.user_agent or "") == "custom-agent/1"
+
+
+# --- ack parsing must decode, not match text -----------------------------
+
+
+def test_accept_with_spaces_after_commas_is_parsed() -> None:
+    """JSON writers may put whitespace after commas; a text match misses it."""
+    frame = json.dumps(
+        {"payload": json.dumps({"step": [[5, "replaceOptimsiticMessage", "123", "mid.$cX"]]})}
+    )
+    ack = parse_ack(frame, "123")
+    assert ack.matched is True
+    assert ack.message_id == "mid.$cX"
+    assert ack.rejected is False
+
+
+def test_marker_inside_a_normal_string_is_not_a_rejection() -> None:
+    """A message body quoting the marker must not condemn the send."""
+    frame = json.dumps(
+        {
+            "payload": json.dumps(
+                {
+                    "step": [[5, "replaceOptimsiticMessage", "123", "mid.$cY"]],
+                    "note": 'markOptimisticMessageFailed"123',
+                }
+            )
+        }
+    )
+    ack = parse_ack(frame, "123")
+    assert ack.rejected is False
+    assert ack.message_id == "mid.$cY"
+
+
+def test_rejection_is_read_from_the_step_not_the_text() -> None:
+    frame = json.dumps(
+        {
+            "payload": json.dumps(
+                {"step": [[5, "markOptimisticMessageFailed", "123", "Couldn't send."]]}
+            )
+        }
+    )
+    ack = parse_ack(frame, "123")
+    assert ack.matched is True
+    assert ack.rejected is True
+
+
+def test_unrelated_step_is_not_a_verdict() -> None:
+    frame = json.dumps(
+        {"payload": json.dumps({"step": [[5, "replaceOptimsiticMessage", "999", "mid.$cZ"]]})}
+    )
+    ack = parse_ack(frame, "123")
+    assert ack.matched is False
+
+
+def test_undecodable_frame_falls_back_but_stays_anchored() -> None:
+    raw = 'garbage "markOptimisticMessageFailed" , "123" trailing'
+    assert parse_ack(raw, "123").rejected is True
+    assert parse_ack(raw, "999").matched is False
+
+
+# --- handshake auth failure invalidates the session ---------------------
+
+
+def test_rejected_handshake_invalidates_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    from facebook_mcp.core.exceptions import AuthError
+
+    class _BadHandshake(Exception):
+        status_code = 401
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise _BadHandshake("Handshake status 401 Unauthorized")
+
+    import websocket
+
+    monkeypatch.setattr(websocket, "create_connection", boom)
+
+    session = SessionManager(Settings(cookie="c_user=42; xs=tok", cookie_file=None))
+    sender = LightspeedSender(Settings(), session)
+    with pytest.raises(AuthError, match="refused the credentials"):
+        sender.send("1", "hello")
+
+    assert session.rejected, "an auth rejection left the session marked as valid"
+
+
+def test_transport_failure_does_not_invalidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("network unreachable")
+
+    import websocket
+
+    monkeypatch.setattr(websocket, "create_connection", boom)
+
+    session = SessionManager(Settings(cookie="c_user=42; xs=tok", cookie_file=None))
+    sender = LightspeedSender(Settings(), session)
+    with pytest.raises(LightspeedError):
+        sender.send("1", "hello")
+    assert session.rejected is None

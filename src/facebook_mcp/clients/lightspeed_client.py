@@ -21,14 +21,16 @@ where the gateway is unreachable, …).
 from __future__ import annotations
 
 import contextlib
+import json
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from ..core.config import Settings
-from ..core.exceptions import FacebookError, SendRejectedError, SendUncertainError
+from ..core.exceptions import AuthError, FacebookError, SendRejectedError, SendUncertainError
 from ..core.logger import get_logger
 from ..session.manager import SessionManager
 from ..transport import lightspeed
@@ -156,6 +158,18 @@ class LightspeedSender:
                 **options,
             )
         except Exception as exc:
+            status = _handshake_status(exc)
+            if status in (401, 403):
+                # The socket answered with an auth rejection: the cookies are
+                # dead here, not merely unreachable. Mark the session so the rest
+                # of the process stops replaying them (and re-bootstraps if it
+                # can) instead of opening a new channel per attempt.
+                self._session.invalidate(
+                    f"Messenger gateway rejected the handshake (HTTP {status})"
+                )
+                raise AuthError(
+                    f"the Messenger gateway refused the credentials (HTTP {status})"
+                ) from exc
             raise LightspeedError(f"cannot open the Messenger gateway: {exc}") from exc
 
     def _proxy_options(self) -> dict[str, Any]:
@@ -163,10 +177,18 @@ class LightspeedSender:
 
         The channel must leave through the same egress as curl_cffi: a search and
         a send from one account should not be seen from two different addresses.
-        SOCKS needs PySocks, which is not a dependency; say so instead of silently
-        connecting directly.
+
+        Notes that cost an afternoon each:
+
+        * ``websocket-client`` implements SOCKS through **python-socks**, not
+          PySocks — checking the wrong module reports a fixable proxy as broken;
+        * the scheme is forwarded verbatim, because ``socks5h`` (remote DNS) and
+          ``socks5`` (local DNS) are different proxies with different leaks, and
+          collapsing them changes which side resolves the name;
+        * credentials in the proxy URL must travel as ``http_proxy_auth`` or an
+          authenticated proxy answers 407.
         """
-        from urllib.parse import urlparse
+        from urllib.parse import unquote, urlparse
 
         proxy = resolve_proxy(self._settings.proxy, self._settings.proxy_from_system)
         if not proxy:
@@ -179,17 +201,25 @@ class LightspeedSender:
         scheme = (parsed.scheme or "http").lower()
         if scheme.startswith("socks"):
             try:
-                import socks  # noqa: F401
+                import python_socks  # noqa: F401
             except ImportError as exc:
                 raise LightspeedError(
-                    f"proxy {proxy!r} needs SOCKS support in the WebSocket client; "
-                    "install PySocks or point FB_PROXY at an http:// proxy"
+                    f"proxy {proxy!r} needs python-socks for the WebSocket client; "
+                    "install it (pip install python-socks) or point FB_PROXY at an "
+                    "http:// proxy"
                 ) from exc
-        return {
+
+        options: dict[str, Any] = {
             "http_proxy_host": parsed.hostname,
             "http_proxy_port": parsed.port,
-            "proxy_type": "http" if scheme.startswith("http") else "socks5",
+            "proxy_type": scheme,
         }
+        if parsed.username:
+            options["http_proxy_auth"] = (
+                unquote(parsed.username),
+                unquote(parsed.password or ""),
+            )
+        return options
 
     def _warm_up_and_send(self, ws: Any, uid: str, thread_key: str, text: str) -> tuple[str, int]:
         if self._warmup:
@@ -277,32 +307,95 @@ class LightspeedSender:
         )
 
 
+def _handshake_status(exc: BaseException) -> int | None:
+    """HTTP status of a failed WebSocket handshake, when the library exposes one."""
+    for name in ("status_code", "status"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 def parse_ack(text: str, otid: str) -> Ack:
     """Extract the verdict for ``otid`` from a gateway frame.
 
-    The gateway nests its steps inside a JSON *string*, so quotes arrive escaped
-    (``\"replaceOptimsiticMessage\",\"<otid>\",\"mid.$...\"``). Matching the raw
-    text misses that, and missing an acceptance is the dangerous direction: the
-    message is delivered while the caller is told it was not.
+    The gateway nests its steps inside a JSON *string*, so the verdict has to be
+    reached by decoding, not by matching text: a JSON body may carry spaces after
+    commas, and a normal string field may quote the marker verbatim. Both used to
+    fool the string comparison — one by missing a real acceptance (message
+    delivered, caller told it failed), the other by inventing a rejection.
+
+    A frame may report several messages, so the verdict is the step that names
+    *our* otid. ``matched`` is False when no step mentions it.
     """
-    normalized = text.replace('\\"', '"')
+    nested = _load_json_object(text)
+    verdict = _find_verdict_step(nested, otid) if nested is not None else None
 
-    # Verdicts are per step and carry the otid they belong to. A frame may report
-    # several messages (ours succeeding, another failing), so matching the marker
-    # alone would blame our send for someone else's failure.
-    reject_marker = f'"{REJECT_MARKER}","{otid}"'
-    accept_marker = f'"{ACCEPT_MARKER}","{otid}"'
-
-    if reject_marker in normalized:
-        return Ack(otid=otid, message_id=None, rejected=True, raw=text[:400], matched=True)
-
-    if accept_marker not in normalized:
+    if verdict is None:
+        # Not decodable (truncated frame, unknown envelope): fall back to a
+        # whitespace-tolerant scan, still anchored to our otid.
+        normalized = text.replace('\\"', '"')
+        rejected = re.search(rf'{REJECT_MARKER}"\s*,\s*"{re.escape(otid)}"', normalized)
+        accepted = re.search(
+            rf'{ACCEPT_MARKER}"\s*,\s*"{re.escape(otid)}"\s*,\s*"([^"]*)"', normalized
+        )
+        if rejected:
+            return Ack(otid=otid, message_id=None, rejected=True, raw=text[:400], matched=True)
+        if accepted:
+            return Ack(
+                otid=otid,
+                message_id=accepted.group(1) or None,
+                rejected=False,
+                raw=text[:400],
+                matched=True,
+            )
         return Ack(otid=otid, message_id=None, rejected=False, raw=text[:400], matched=False)
 
-    message_id = None
-    rest = normalized[normalized.find(accept_marker) + len(accept_marker) :]
-    if rest.startswith(","):
-        candidate = rest[1:].lstrip()
-        if candidate.startswith('"'):
-            message_id = candidate[1:].split('"', 1)[0] or None
-    return Ack(otid=otid, message_id=message_id, rejected=False, raw=text[:400], matched=True)
+    name, message_id = verdict
+    if name == REJECT_MARKER:
+        return Ack(otid=otid, message_id=None, rejected=True, raw=text[:400], matched=True)
+    return Ack(
+        otid=otid,
+        message_id=message_id or None,
+        rejected=False,
+        raw=text[:400],
+        matched=True,
+    )
+
+
+def _load_json_object(text: str) -> Any | None:
+    """Decode a gateway frame, unwrapping the JSON-string payload if present."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        outer = json.loads(text[start:])
+    except ValueError:
+        return None
+    if isinstance(outer, dict) and isinstance(outer.get("payload"), str):
+        try:
+            return json.loads(outer["payload"])
+        except ValueError:
+            return outer
+    return outer
+
+
+def _find_verdict_step(node: Any, otid: str) -> tuple[str, str | None] | None:
+    """Find ``[5, "<verdict>", "<otid>", "<mid>"?]`` anywhere in the tree."""
+    stack: list[Any] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            if (
+                len(current) >= 3
+                and current[0] == 5
+                and isinstance(current[1], str)
+                and current[1] in (ACCEPT_MARKER, REJECT_MARKER)
+                and str(current[2]) == otid
+            ):
+                message_id = current[3] if len(current) > 3 else None
+                return current[1], message_id if isinstance(message_id, str) else None
+            stack.extend(reversed(current))
+        elif isinstance(current, dict):
+            stack.extend(reversed(list(current.values())))
+    return None

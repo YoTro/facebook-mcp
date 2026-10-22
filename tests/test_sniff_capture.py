@@ -8,6 +8,7 @@ lost even though they reached the client.
 
 from __future__ import annotations
 
+import stat
 import sys
 import time
 from pathlib import Path
@@ -128,3 +129,20 @@ def test_websocket_events_reach_the_recorder(tmp_path) -> None:
     written = list((tmp_path).glob("*.bin"))
     assert written, "the binary frame was not saved"
     assert written[0].read_bytes() == bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+
+def test_frame_files_are_unique_and_private(tmp_path) -> None:
+    """Same-millisecond, same-length frames must not overwrite each other."""
+    frame = {
+        "method": "Network.webSocketFrameSent",
+        "params": {"response": {"opcode": 2, "payloadData": "AAECAwQFBgcICQ=="}},
+    }
+    seen: list[dict] = []
+    for _ in range(2):
+        sniff._record_websocket(frame, seen, tmp_path)
+
+    files = sorted(tmp_path.glob("*.bin"))
+    assert len(files) == 2, "one frame overwrote the other"
+    assert len({f.name for f in files}) == 2
+    for path in files:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path

@@ -149,7 +149,11 @@ class SessionManager:
 
         account_paths = settings.account_paths()
         if account_paths.cookies_file.is_file():
-            self._source = "account-store"
+            # A jar this tool wrote after bootstrapping stays *refreshable*: if
+            # Facebook rejects it, invalidate() must be allowed to discard it and
+            # bootstrap again, exactly as it would in the process that wrote it.
+            meta = account_paths.load_meta()
+            self._source = "bootstrap" if meta.get("source") == "cdp-bootstrap" else "account-store"
             warning = account_paths.permission_warning()
             if warning:
                 logger.warning(warning)

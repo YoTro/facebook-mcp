@@ -208,7 +208,10 @@ class MessageClient(BaseClient):
     ) -> None:
         super().__init__(transport, session, settings)
         self._profiles = profile_client
-        self._lightspeed = LightspeedSender(settings, session) if settings is not None else None
+        # Injected by the composition root. Constructing one here would both
+        # break the "clients never build their collaborators" rule and bypass any
+        # substitute a test or a caller supplied.
+        self._lightspeed = lightspeed_sender
 
     # --- public API -----------------------------------------------------
 
@@ -272,12 +275,12 @@ class MessageClient(BaseClient):
         return self._profiles.resolve(cleaned).uid
 
     def send_via_graphql(self, recipient: str, text: str) -> SendResult:
-        """Protocol-level send — kept as an explicit dead end.
+        """Kept as an explicit dead end: there is no page-level GraphQL mutation.
 
-        Messenger does not expose a page-level GraphQL mutation for sending
-        (verified: the request is issued by the service worker, and the
-        Lightspeed WebSocket frames carry no readable body). See
-        ARCHITECTURE §8.3 for the evidence.
+        Sending happens over the Lightspeed WebSocket, implemented in
+        ``clients/lightspeed_client.py`` — that is the protocol path this codebase
+        uses. This method exists only so callers looking for a Relay mutation get
+        pointed at it instead of guessing.
         """
         raise UnsupportedError(
             "Messenger sends go through Facebook's service worker / Lightspeed "
