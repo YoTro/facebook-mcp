@@ -80,17 +80,26 @@ class BaseClient:
         if needs_auth and not self._session.from_config:
             hint = "cdp"
 
-        resp = self._transport.request(
-            HttpRequest(
-                method=route.method,
-                url=url or (FACEBOOK_BASE + route.path),
-                headers=merged,
-                params=params,
-                data=data,
-                transport_hint=hint,
-                credentials="omit" if route.anonymous else "include",
+        try:
+            resp = self._transport.request(
+                HttpRequest(
+                    method=route.method,
+                    url=url or (FACEBOOK_BASE + route.path),
+                    headers=merged,
+                    params=params,
+                    data=data,
+                    transport_hint=hint,
+                    credentials="omit" if route.anonymous else "include",
+                )
             )
-        )
+        except AuthError:
+            # The CDP transport raises AuthError from inside request() (it maps
+            # the in-page status itself), so the status check below never runs.
+            # Invalidate here too, or a rejected browser session keeps claiming
+            # to be logged in and every later call repeats the same 403.
+            if needs_auth:
+                self._session.invalidate("the transport reported the credentials were rejected")
+            raise
         try:
             self._raise_for_facebook_status(resp)
         except AuthError:

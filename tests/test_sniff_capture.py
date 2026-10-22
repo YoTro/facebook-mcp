@@ -39,7 +39,7 @@ class _FakeTransport:
         self._batches = batches
         self.calls = 0
 
-    def drain_events(self, timeout: float = 1.0) -> list[dict]:
+    def drain_events(self, timeout: float = 1.0, deadline: float | None = None) -> list[dict]:
         self.calls += 1
         return self._batches.pop(0) if self._batches else []
 

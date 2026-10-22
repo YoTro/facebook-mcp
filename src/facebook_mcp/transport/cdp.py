@@ -63,7 +63,8 @@ class CdpTransport(Transport):
 
     def __init__(self, settings: Settings, *, ws_factory: Any | None = None) -> None:
         self._settings = settings
-        self._base = settings.cdp_url.rstrip("/")
+        self._base = (settings.cdp_url or "").rstrip("/")
+        self._account = settings.account
         self._page_url = settings.cdp_page_url or _DEFAULT_PAGE_URL
         self._timeout = settings.cdp_timeout
         self._ws: Any | None = None
@@ -154,8 +155,15 @@ class CdpTransport(Transport):
         """Expose raw protocol calls (used by ``tools/sniff.py``)."""
         return self._send(method, params or {})
 
-    def drain_events(self, timeout: float = 1.0) -> list[dict[str, Any]]:
-        """Return buffered events, reading more from the socket until ``timeout``.
+    def drain_events(
+        self, timeout: float = 1.0, deadline: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Return buffered events, reading more from the socket until idle.
+
+        ``timeout`` is the *idle* window: reading stops after that long without
+        an event. ``deadline`` (an absolute ``time.monotonic()`` value) bounds the
+        whole call, so a capture cannot run forever on a busy stream — a loop fed
+        by continuous events would otherwise never return.
 
         Used by packet capture; protocol replies are unaffected because
         :meth:`_send` always consumes its own reply first.
@@ -166,8 +174,14 @@ class CdpTransport(Transport):
 
         previous_timeout = getattr(ws, "timeout", None)
         try:
-            ws.settimeout(timeout)
             while True:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    ws.settimeout(min(timeout, remaining))
+                else:
+                    ws.settimeout(timeout)
                 try:
                     raw = ws.recv()
                 except Exception:  # noqa: BLE001 - timeout is the normal exit
@@ -222,6 +236,12 @@ class CdpTransport(Transport):
         """Small JSON-over-HTTP helper for the DevTools discovery endpoints."""
         from curl_cffi import requests as curl_requests
 
+        if not self._base:
+            raise CdpError(
+                f"no browser is bound to account {self._account!r}; add "
+                '"cdp_url" to its account.json (tools/launch_chrome_debug.sh '
+                "writes it) — the global FB_CDP_URL belongs to the other account"
+            )
         url = f"{self._base}{path}"
         try:
             resp = curl_requests.request(method, url, timeout=5, proxies={"http": "", "https": ""})

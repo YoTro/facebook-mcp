@@ -358,3 +358,94 @@ def test_anonymous_route_omits_credentials_end_to_end() -> None:
 
     assert transport.requests[-1].credentials == "omit"
     assert "Cookie" not in transport.requests[-1].headers
+
+
+# --- transport-raised AuthError must invalidate the session -------------
+#
+# The CDP transport maps the in-page status itself and raises AuthError from
+# inside request(), so BaseClient's post-return status check never runs.
+
+
+class _AuthRaisingTransport:
+    def __init__(self) -> None:
+        self.requests = 0
+
+    @property
+    def name(self) -> str:
+        return "auth-raising"
+
+    def request(self, req: HttpRequest) -> HttpResponse:
+        self.requests += 1
+        from facebook_mcp.core.exceptions import AuthError
+
+        raise AuthError("access denied (HTTP 403)")
+
+    def close(self) -> None:
+        pass
+
+
+def test_transport_auth_error_invalidates_the_session() -> None:
+    from facebook_mcp.clients.base import BaseClient
+    from facebook_mcp.core.exceptions import AuthError
+    from facebook_mcp.routes.base import Route
+    from facebook_mcp.session.manager import SessionManager
+
+    transport = _AuthRaisingTransport()
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = BaseClient(transport, session, Settings())  # type: ignore[arg-type]
+
+    with pytest.raises(AuthError):
+        client._request(Route(op="x", method="GET", path="/x", requires_auth=True))
+
+    assert session.rejected, "a rejected browser session kept claiming to be valid"
+    with pytest.raises(AuthError, match="rejected"):
+        session.require_auth()
+
+
+def test_transport_auth_error_on_a_public_route_keeps_the_session() -> None:
+    from facebook_mcp.clients.base import BaseClient
+    from facebook_mcp.core.exceptions import AuthError
+    from facebook_mcp.routes.base import Route
+    from facebook_mcp.session.manager import SessionManager
+
+    transport = _AuthRaisingTransport()
+    session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
+    client = BaseClient(transport, session, Settings())  # type: ignore[arg-type]
+
+    with pytest.raises(AuthError):
+        client._request(Route(op="x", method="GET", path="/x", requires_auth=False))
+
+    assert session.rejected is None
+
+
+def test_drain_events_honours_the_overall_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A continuous event stream must not keep a capture alive past its budget."""
+    import time
+
+    from facebook_mcp.transport.cdp import CdpTransport
+
+    class _ChattyWs:
+        timeout = 1.0
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def settimeout(self, value: float) -> None:
+            self.timeout = value
+
+        def recv(self) -> str:
+            self.calls += 1
+            return json.dumps({"method": "Network.requestWillBeSent", "params": {}})
+
+    ws = _ChattyWs()
+    transport = CdpTransport(Settings())
+    transport._ws = ws  # type: ignore[assignment]
+    transport._ws_url = "ws://fake"
+
+    started = time.monotonic()
+    events = transport.drain_events(timeout=0.5, deadline=time.monotonic() + 0.30)
+    elapsed = time.monotonic() - started
+
+    assert events, "buffered/streamed events should still be returned"
+    assert elapsed < 2.0, f"drain_events ignored the deadline ({elapsed:.2f}s)"
+    assert ws.calls > 0

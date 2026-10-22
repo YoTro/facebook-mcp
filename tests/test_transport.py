@@ -16,10 +16,20 @@ from facebook_mcp.transport import CurlCffiTransport, HttpRequest
 
 class _Handler(BaseHTTPRequestHandler):
     flaky_count = 0
+    retry_cookie_count = 0
 
     def do_GET(self) -> None:
         if self.path == "/echo-headers":
             self._respond(200, str(dict(self.headers)))
+        elif self.path == "/retry-with-cookie":
+            type(self).retry_cookie_count += 1
+            if type(self).retry_cookie_count == 1:
+                self.send_response(503)
+                self.send_header("Set-Cookie", "c_user=99; Path=/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._respond(200, str(dict(self.headers)))
         elif self.path == "/set-cookie":
             self.send_response(200)
             self.send_header("Set-Cookie", "c_user=99; Path=/")
@@ -64,6 +74,7 @@ def server() -> str:
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     _Handler.flaky_count = 0
+    _Handler.retry_cookie_count = 0
     yield base
     httpd.shutdown()
     httpd.server_close()
@@ -273,3 +284,15 @@ class _FakeCdp:
 
     def cookies(self, url: str | None = None) -> dict[str, str]:
         return {}
+
+
+def test_omit_retry_does_not_reuse_a_cookie_from_the_failed_response(server: str) -> None:
+    """A retryable 503 may set cookies; the retry must still be cookie-free."""
+    t = _make_transport(max_retries=2, min_request_interval=0.0)
+    t._backoff = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    try:
+        resp = t.request(HttpRequest("GET", f"{server}/retry-with-cookie", credentials="omit"))
+        assert resp.status_code == 200
+        assert "Cookie" not in resp.text
+    finally:
+        t.close()

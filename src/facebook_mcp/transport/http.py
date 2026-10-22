@@ -54,12 +54,15 @@ class CurlCffiTransport(Transport):
     def request(self, req: HttpRequest) -> HttpResponse:
         impersonate = req.impersonate or self._impersonate
         last_error: str | None = None
-        session = self._session_for(req.credentials)
 
         for attempt in range(self._max_retries):
             # Throttle every attempt, not just the first: a retry is still a
             # request and must respect the configured minimum interval.
             self._limiter.wait()
+            # Resolve per attempt: _session_for() also clears the anonymous jar,
+            # so a cookie set by a failed (retryable) response cannot ride along
+            # on the retry and break the "omit" guarantee.
+            session = self._session_for(req.credentials)
             try:
                 resp = session.request(
                     req.method,
