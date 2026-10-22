@@ -307,7 +307,12 @@ def test_authenticated_http_when_cookies_configured() -> None:
     assert transport.requests[-1].transport_hint is None
 
 
-def test_authenticated_cdp_when_cookies_come_from_browser() -> None:
+def test_authenticated_request_uses_http_after_browser_bootstrap() -> None:
+    """Once cookies exist, curl_cffi serves the call; CDP is not needed again.
+
+    The hint used to be `"cdp"` here, which kept a browser alive for every
+    authenticated read even though the HTTP transport had a usable jar.
+    """
     transport = _RecordingTransport({})
     session = SessionManager(
         Settings(cookie=None, cookie_file=None), lambda: {"c_user": "1", "xs": "2"}
@@ -317,7 +322,8 @@ def test_authenticated_cdp_when_cookies_come_from_browser() -> None:
     from facebook_mcp.routes.base import Route
 
     client._request(Route(op="x", method="GET", path="/x", requires_auth=True))
-    assert transport.requests[-1].transport_hint == "cdp"
+    assert session.is_authenticated is True
+    assert transport.requests[-1].transport_hint is None
 
 
 # --- MCP wiring ---------------------------------------------------------

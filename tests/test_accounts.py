@@ -363,3 +363,88 @@ def test_unbound_browser_fails_with_an_actionable_message(
     with pytest.raises(CdpError, match="no browser is bound to account 'work'"):
         transport.cookies()
     transport.close() if hasattr(transport, "close") else None
+
+
+# --- browser-bootstrapped sessions become HTTP-capable -------------------
+
+
+def test_bootstrapped_session_uses_http_not_cdp(tmp_path: Path) -> None:
+    """Once cookies exist, curl_cffi can serve the request; CDP was not needed."""
+    from facebook_mcp.clients.base import BaseClient
+    from facebook_mcp.routes.base import Route
+    from facebook_mcp.transport.base import HttpResponse
+
+    class _Recorder:
+        def __init__(self) -> None:
+            self.requests: list = []
+
+        @property
+        def name(self) -> str:
+            return "recorder"
+
+        def request(self, req):
+            self.requests.append(req)
+            return HttpResponse(200, req.url, {}, "{}", b"")
+
+        def close(self) -> None:
+            pass
+
+    transport = _Recorder()
+    session = SessionManager(_settings(tmp_path), lambda: {"c_user": "1", "xs": "2"})
+    client = BaseClient(transport, session, _settings(tmp_path))  # type: ignore[arg-type]
+
+    client._request(Route(op="x", method="GET", path="/x", requires_auth=True))
+
+    assert session.from_config is False, "provenance must not change"
+    assert transport.requests[-1].transport_hint is None, "still routed to CDP"
+
+
+def test_bootstrap_persists_cookies_for_the_next_run(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    manager = SessionManager(settings, lambda: {"c_user": "7", "xs": "tok", "datr": "d"})
+    assert manager.require_auth().user_id == "7"
+
+    paths = AccountPaths.for_account("default", tmp_path)
+    assert paths.cookies_file.is_file()
+    assert stat.S_IMODE(paths.cookies_file.stat().st_mode) == 0o600
+    assert "c_user\t7" in paths.cookies_file.read_text(encoding="utf-8")
+    assert paths.load_meta()["source"] == "cdp-bootstrap"
+
+    # A later process reads the store and needs no browser at all.
+    reopened = SessionManager(_settings(tmp_path))
+    assert reopened.is_authenticated is True
+    assert reopened.state.user_id == "7"
+    assert reopened.from_config is True
+
+
+def test_bootstrap_does_not_shadow_a_user_managed_jar(tmp_path: Path) -> None:
+    explicit = tmp_path / "mine.txt"
+    explicit.write_text(NETSCAPE, encoding="utf-8")
+    settings = _settings(tmp_path, cookie_file=str(explicit))
+
+    SessionManager(settings)  # loads the user's jar
+    assert not AccountPaths.for_account("default", tmp_path).cookies_file.exists()
+
+
+def test_invalidate_discards_a_bootstrapped_jar(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    manager = SessionManager(settings, lambda: {"c_user": "7", "xs": "tok"})
+    manager.require_auth()
+
+    paths = AccountPaths.for_account("default", tmp_path)
+    assert paths.cookies_file.is_file()
+
+    manager.invalidate("HTTP 403")
+    assert not paths.cookies_file.exists(), "a refused jar would be reloaded next start"
+    assert paths.load_meta()["source"] == "invalidated"
+
+
+def test_invalidate_keeps_a_user_managed_jar(tmp_path: Path) -> None:
+    paths = AccountPaths.for_account("default", tmp_path).ensure()
+    paths.cookies_file.write_text(NETSCAPE, encoding="utf-8")  # no bootstrap marker
+
+    manager = SessionManager(_settings(tmp_path))
+    assert manager.is_authenticated is True
+
+    manager.invalidate("HTTP 403")
+    assert paths.cookies_file.exists(), "the user's own jar must not be deleted"

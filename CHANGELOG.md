@@ -52,6 +52,20 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   divergences in §6.3 and §7 were corrected. `.env.example` no longer repeats the
   CDP block and documents `FB_ROUTE_DOC_IDS`.
 
+### Changed
+
+- **Search no longer needs a browser after the first bootstrap.** The CDP hint
+  was keyed on where the cookies came from (`from_config`), so a session
+  bootstrapped from Chrome sent every authenticated search back through CDP. The
+  rule is now "does the session hold cookies": if it does, curl_cffi serves the
+  request, and CDP is only used when there are none.
+- **Bootstrapped cookies are persisted.** They are written to the account store
+  (0600, `source: cdp-bootstrap`), so a single attached Chrome is enough for good;
+  later runs are pure HTTP (`FB_PERSIST_BROWSER_COOKIES` opts out). When Facebook
+  rejects such a jar, `invalidate()` deletes it so the next call re-bootstraps
+  instead of reloading a dead cookie at the next start. A user-managed
+  `FB_COOKIE`/`FB_COOKIE_FILE` is never touched.
+
 ### Fixed
 
 - **A wrong conclusion about the protocol was corrected.** This changelog and

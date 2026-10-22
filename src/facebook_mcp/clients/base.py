@@ -72,14 +72,15 @@ class BaseClient:
         if headers:
             merged.update(headers)
 
-        # Authenticated operations run inside the browser when a hybrid/CDP
-        # transport is active; plain HTTP transports simply ignore the hint.
-        # Protocol first: configured cookies mean curl_cffi can do the job
-        # itself; otherwise the browser supplies the login state.
-        hint: str | None = None
-        if needs_auth and not self._session.from_config:
-            hint = "cdp"
-
+        # Protocol first, always: `require_auth()` above has already bootstrapped
+        # cookies from the browser when it was allowed to, so by this point the
+        # session either holds a usable jar (curl_cffi serves the request) or the
+        # call has already failed. The old `from_config` hint sent every
+        # browser-bootstrapped session back through CDP, which kept a browser
+        # alive for reads the HTTP transport handles.
+        #
+        # The browser is still used deliberately elsewhere: cookie bootstrapping,
+        # the Messenger UI path, and anything reached through `cdp_from()`.
         try:
             resp = self._transport.request(
                 HttpRequest(
@@ -88,7 +89,6 @@ class BaseClient:
                     headers=merged,
                     params=params,
                     data=data,
-                    transport_hint=hint,
                     credentials="omit" if route.anonymous else "include",
                 )
             )

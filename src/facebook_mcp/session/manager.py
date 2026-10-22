@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 
 from ..core.config import Settings
@@ -86,7 +87,28 @@ class SessionManager:
         self._state.lsd = None
         if not self.from_config:
             self._state.cookies.clear()
+        if self._persisted_by_bootstrap():
+            # The store only holds what the browser handed us; deleting it lets
+            # the next start (or the next require_auth) bootstrap again instead
+            # of loading a cookie Facebook already refused. Checked separately:
+            # a session can be bootstrapped (from_config stays False) *and* have
+            # written that jar to disk.
+            self._discard_persisted()
+            self._state.cookies.clear()
         logger.info("session invalidated (%s)", self._rejected)
+
+    def _persisted_by_bootstrap(self) -> bool:
+        return self._settings.account_paths().load_meta().get("source") == "cdp-bootstrap"
+
+    def _discard_persisted(self) -> None:
+        paths = self._settings.account_paths()
+        try:
+            if paths.cookies_file.is_file():
+                paths.cookies_file.unlink()
+            paths.merge_meta(source="invalidated")
+            logger.info("discarded persisted bootstrapped cookies")
+        except OSError as exc:  # pragma: no cover - disk/permission problems
+            logger.warning("could not discard persisted cookies: %s", exc)
 
     @property
     def rejected(self) -> str | None:
@@ -179,4 +201,40 @@ class SessionManager:
             return False
         self._rejected = None
         logger.info("bootstrapped %d cookies from browser", len(cookies))
+        self._persist_bootstrapped(cookies)
         return True
+
+    def _persist_bootstrapped(self, cookies: dict[str, str]) -> None:
+        """Store browser cookies in the account store for browser-free runs.
+
+        The exported jar then outranks the browser on the next start, so a single
+        login (or a single attached Chrome) is enough. Skipped when the user
+        manages credentials themselves, and the file is marked so
+        :meth:`invalidate` knows it may delete it.
+        """
+        settings = self._settings
+        if not settings.persist_browser_cookies:
+            return
+        if settings.cookie or settings.cookie_file:
+            return  # the user owns this jar; do not shadow it
+
+        paths = settings.account_paths()
+        expiry = int(time.time()) + 30 * 86400
+        lines = [
+            "# Netscape HTTP Cookie File",
+            "# Written by facebook-mcp after bootstrapping from Chrome.",
+        ]
+        for name, value in sorted(cookies.items()):
+            lines.append(
+                "\t".join([".facebook.com", "TRUE", "/", "TRUE", str(expiry), name, value])
+            )
+        try:
+            paths.ensure()
+            paths.cookies_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            paths.cookies_file.chmod(0o600)
+            paths.merge_meta(
+                source="cdp-bootstrap", c_user=cookies.get("c_user"), updated_at=int(time.time())
+            )
+            logger.info("persisted bootstrapped cookies to %s", paths.cookies_file)
+        except OSError as exc:  # pragma: no cover - disk/permission problems
+            logger.warning("could not persist bootstrapped cookies: %s", exc)

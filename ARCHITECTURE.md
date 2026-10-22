@@ -206,7 +206,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 327 项测试(全部离线)
+└── tests/                           # 332 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -330,6 +330,11 @@ class Transport(Protocol):
   - 装载优先级:`FB_COOKIE_FILE` → `~/.facebook-mcp/accounts/<account>/cookies.txt`
     → `FB_COOKIE` → 匿名(详见 §5.8)
   - `require_auth()`:未登录时**尝试**通过 `cookie_provider` 从浏览器补齐,再失败才抛 `AuthError`
+  - **引导后立即持久化**:补到的 cookie 写入账户库(0600)并在 `account.json` 标
+    `source: cdp-bootstrap`,下一次启动就是纯 HTTP;`FB_PERSIST_BROWSER_COOKIES=false`
+    可关闭。用户自管的 `FB_COOKIE` / `FB_COOKIE_FILE` 不会被覆盖
+  - `invalidate()`:若账户库里的 jar 是 bootstrap 写进去的,直接**删掉**它,下一次
+    `require_auth()` 会重新从浏览器引导;用户自管的 jar 只在内存里作废,不删文件
   - `invalidate(reason)`:Facebook 拒绝凭据后调用。总是丢弃 `fb_dtsg` / `lsd`;
     浏览器来源的会话同时清空 cookie,下次 `require_auth()` 重新从浏览器取;
     文件/字符串来源的 jar 无法在进程内刷新,保留但标记为 rejected,
@@ -906,8 +911,8 @@ client 是**逻辑**。**接口参数与模板**的变化只改 `routes/`,业务
 | 条件 | 通道 |
 |---|---|
 | 公开读(`requires_auth=False`) | curl_cffi |
-| 需登录 **且** cookie 来自账户库/配置(`session.from_config`) | **curl_cffi(纯协议)** |
-| 需登录 **且** 无配置 cookie | CDP(浏览器代跑,首次自动取 cookie) |
+| 需登录 **且** 会话里已有 cookie(账户库、配置,或刚引导来的) | **curl_cffi(纯协议)** |
+| 需登录 **且** 一点 cookie 都没有 | CDP 引导**一次**,随后该请求也走 curl_cffi |
 | 发送消息 | 强制 CDP(`cdp_from()`),HTTP-only 时抛 `UnsupportedError` |
 
 ### 9.4 会话生命周期独立成层
@@ -938,7 +943,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(327 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(332 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -983,7 +988,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:327 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:332 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

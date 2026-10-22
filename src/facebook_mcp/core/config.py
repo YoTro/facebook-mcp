@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # When no cookies are configured, pull them from the attached Chrome on
     # first authenticated operation instead of failing immediately.
     cdp_cookie_bootstrap: bool = True
+    # Write those bootstrapped cookies into the account store, so the next run is
+    # pure HTTP. Only applies when the account store is the authority (no
+    # FB_COOKIE / FB_COOKIE_FILE).
+    persist_browser_cookies: bool = True
 
     # --- proxy ---------------------------------------------------------------
     # Explicit proxy URL, e.g. http://127.0.0.1:10808 or socks5h://127.0.0.1:10808

@@ -224,7 +224,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 327 tests (all offline)
+└── tests/                           # 332 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -362,6 +362,13 @@ class Transport(Protocol):
     → `FB_COOKIE` → anonymous (see §5.8)
   - `require_auth()`: when logged out it **tries** to bootstrap cookies through
     `cookie_provider`, and only then raises `AuthError`
+  - **persist right after bootstrapping**: the cookies land in the account store
+    (0600) with `source: cdp-bootstrap` in `account.json`, so the next start is
+    pure HTTP (`FB_PERSIST_BROWSER_COOKIES=false` disables it). A user-managed
+    `FB_COOKIE` / `FB_COOKIE_FILE` is never overwritten
+  - `invalidate()`: a jar written by the bootstrap is **deleted**, so the next
+    `require_auth()` re-reads the browser; a user-managed jar is only voided in
+    memory and the file is kept
   - `invalidate(reason)`: called after Facebook rejects the credentials. Always
     drops `fb_dtsg` / `lsd`; a browser-backed session also clears its cookies so
     the next `require_auth()` re-reads the live jar. A file/string jar cannot be
@@ -1008,8 +1015,8 @@ layout change requires a client change (§11 already lists it as brittle). See
 | Condition | Channel |
 |---|---|
 | public read (`requires_auth=False`) | curl_cffi |
-| login required **and** cookies from the account store/config (`session.from_config`) | **curl_cffi (pure protocol)** |
-| login required **and** no configured cookies | CDP (browser acts for us, bootstrapping cookies on first use) |
+| login required **and** the session already holds cookies (store, config, or just bootstrapped) | **curl_cffi (pure protocol)** |
+| login required **and** no cookies at all | CDP **once** to bootstrap them; that same request then uses curl_cffi |
 | sending a message | forced CDP (`cdp_from()`); raises `UnsupportedError` on HTTP-only transports |
 
 ### 9.4 Session lifecycle is its own layer
@@ -1043,7 +1050,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (327), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (332), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1091,7 +1098,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 327 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 332 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
