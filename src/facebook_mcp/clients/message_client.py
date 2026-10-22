@@ -133,7 +133,12 @@ def _failed_bubbles(cdp: BrowserTransport, needle: str | None = None) -> int:
     if (!markers.includes(text)) continue;               // exact, not "contains"
     if (needle) {{
       const article = node.closest('[role="article"]');
-      if (!article || !(article.innerText || '').includes(needle)) continue;
+      // innerText keeps the message's line breaks; the needle was collapsed to
+      // single spaces, so collapse the bubble the same way before comparing.
+      const haystack = ((article && article.innerText) || '')
+        .replace(/\\s+/g, ' ')
+        .trim();
+      if (!haystack.includes(needle)) continue;
     }}
     failed += 1;
   }}
@@ -174,6 +179,16 @@ def _same_name(actual: str, expected: str) -> bool:
             if len(stem) >= 3 and long.startswith(stem):
                 return True
     return False
+
+
+def _collapse(value: str) -> str:
+    """Collapse runs of whitespace, matching what the in-page probe compares.
+
+    ``innerText`` keeps line breaks while the needle is a single-line prefix, so
+    both sides must be normalised before comparing. Without this, sending
+    "Hello\nExample User" never matches its own bubble.
+    """
+    return " ".join(value.split())
 
 
 def _script(body: str) -> str:
@@ -567,11 +582,23 @@ class MessageClient(BaseClient):
     def _assert_composer_target(
         self, cdp: BrowserTransport, expected_target: str | None, *, when: str
     ) -> None:
-        """Fail unless the composer still addresses ``expected_target``."""
+        """Fail unless the composer still addresses ``expected_target``.
+
+        With an expected recipient, an *unreadable* composer is a failure too:
+        "cannot verify" must not be treated as "verified". Only when no
+        expectation exists (the recipient name was never readable) is there
+        nothing to compare against.
+        """
         if not expected_target:
             return
         current_target = self._composer_target(cdp)
-        if current_target and not _same_name(current_target, expected_target):
+        if current_target is None:
+            raise FacebookError(
+                f"cannot verify the conversation recipient {when} "
+                f"(expected {expected_target!r}); the composer is gone or its "
+                "label is unreadable — nothing was sent"
+            )
+        if not _same_name(current_target, expected_target):
             raise FacebookError(
                 f"the composer switched to {current_target!r} {when} "
                 f"(expected {expected_target!r}); nothing was sent"
@@ -623,14 +650,14 @@ class MessageClient(BaseClient):
         time.sleep(0.3)
 
         typed = self._composer_text(cdp) or ""
-        if text[:20] not in typed:
+        needle = _collapse(text)[:20]
+        if needle not in _collapse(typed):
             raise ParseError(
                 f"composer did not accept the text (got {typed!r}); aborting before send"
             )
 
         # Only the text we produced counts, so another bubble's failure cannot be
         # mistaken for ours.
-        needle = " ".join(text.split())[:20]
         failed_before = _failed_bubbles(cdp, needle)
 
         self._pace()
@@ -645,6 +672,14 @@ class MessageClient(BaseClient):
         # "not_sent" would invite a duplicate resend.
         try:
             if not self._click_send(cdp):
+                # No send button. Pressing Enter is only safe while our composer
+                # still exists — otherwise the keystroke lands on whatever has
+                # focus and could trigger something unrelated.
+                if self._composer_text(cdp) is None:
+                    raise FacebookError(
+                        "the Messenger composer disappeared before the message "
+                        "could be sent; nothing was sent"
+                    )
                 self._press_enter(cdp)
 
             cleared = self._wait_until_cleared(cdp)

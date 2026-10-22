@@ -61,6 +61,8 @@ class FakeCdp:
         draft: str = "",
         vanish_after_send: bool = False,
         switch_target_after_insert: str | None = None,
+        clear_target_after_insert: bool = False,
+        vanish_before_click: bool = False,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
     ) -> None:
         self.composer_on_thread = composer_on_thread
@@ -80,6 +82,8 @@ class FakeCdp:
         self.draft = draft
         self.vanish_after_send = vanish_after_send
         self.switch_target_after_insert = switch_target_after_insert
+        self.clear_target_after_insert = clear_target_after_insert
+        self.vanish_before_click = vanish_before_click
         self.url = url
 
         self.composer_open = False
@@ -130,6 +134,9 @@ class FakeCdp:
             if self.switch_target_after_insert:
                 # e.g. a docked chat stole the box during the pacing wait
                 self.composer_target = self.switch_target_after_insert
+            if self.clear_target_after_insert:
+                # the label became unreadable (re-render, collapsed chip, ...)
+                self.composer_target = None
             return {}
         if method == "Input.dispatchKeyEvent":
             self.key_events.append(str(params.get("type")))
@@ -171,6 +178,9 @@ class FakeCdp:
         if "return !!composer" in expression:
             return self.composer_open
         if "sendButton.click()" in expression:
+            if self.vanish_before_click:
+                # e.g. the box was replaced between typing and clicking
+                self.composer_open = False
             if not self.send_button:
                 return False
             if self.clears_after_send:
@@ -757,3 +767,60 @@ def test_conversation_switch_after_typing_is_caught_before_click() -> None:
         _client(cdp).send("200000000000001", "hello")
 
     assert cdp.sent is False, "the message was sent to the wrong conversation"
+
+
+# --- normalisation and "cannot verify" -----------------------------------
+
+
+def test_multiline_text_is_matched_against_a_normalised_bubble() -> None:
+    """A message with line breaks must still be attributable to its bubble."""
+    seen: list[str] = []
+
+    class _CapturingCdp(FakeCdp):
+        def evaluate(self, expression: str, **kwargs):
+            if "const markers =" in expression:
+                seen.append(expression)
+            return super().evaluate(expression, **kwargs)
+
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = _CapturingCdp(composer_on_thread=True, send_fails=True)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "Hello\nExample User")
+
+    assert seen, "rejection probe was not executed"
+    script = seen[0]
+    # The needle is collapsed to one line...
+    assert "Hello Example User" in script
+    # ...and the bubble text is collapsed the same way before comparing.
+    assert "\\\\s+/g" in script or "\\s+/g" in script
+    # A failure was produced, so the send must not be reported as submitted.
+    assert result.delivery == "rejected"
+
+
+def test_unreadable_composer_target_blocks_the_send() -> None:
+    """An expected recipient that can no longer be read is not 'verified'."""
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        composer_target="Example User",
+        clear_target_after_insert=True,
+    )
+
+    with pytest.raises(FacebookError, match="cannot verify the conversation recipient"):
+        _client(cdp).send("200000000000001", "hello")
+    assert cdp.sent is False
+
+
+def test_enter_fallback_is_not_pressed_when_the_composer_vanished() -> None:
+    """Keystrokes must not land on an unrelated element."""
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        composer_target="Example User",
+        send_button=False,
+        vanish_before_click=True,
+    )
+
+    with pytest.raises(FacebookError, match="composer disappeared before"):
+        _client(cdp).send("200000000000001", "hello")
+
+    assert cdp.key_events == [], "Enter was pressed with no composer"
+    assert cdp.sent is False
