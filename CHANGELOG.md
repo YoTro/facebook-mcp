@@ -11,14 +11,18 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Added
 
+- **`send_message` works without a browser.** Messenger's send is reproducible
+  over `wss://gateway.facebook.com/ws/lightspeed`: after posting four
+  thread-context tasks (labels 54/117/767/207 — built from the thread key, no
+  subscription needed) and task 46, the server answers
+  `replaceOptimsiticMessage` with a real `mid.$…`. `clients/lightspeed_client.py`
+  implements the sequence; `send_message` is protocol-first with a UI fallback,
+  selectable via `FB_MESSAGE_TRANSPORT`.
 - `transport/lightspeed.py`: encoder/decoder for Messenger's sync frames. The
   wire format was recovered from a live send and is verified byte-for-byte by
   `tests/test_lightspeed.py` (16-byte header + JSON task body).
-- `tools/lightspeed_probe.py`: talks to `wss://gateway.facebook.com/ws/lightspeed`
-  with nothing but the account's cookies. The gateway routes our task and answers
-  with the `otid` we generated, but marks it `Couldn't send` — one piece of
-  session state (most likely `version_id`) is still missing, so this stays a
-  probe and `send_message` keeps using the UI.
+- `tools/lightspeed_probe.py`: talks to the gateway with nothing but the
+  account's cookies, for further protocol work (`--dry-run` prints the frame).
 - `tools/sniff.py --websocket`: records WebSocket URLs and binary frames, because
   Messenger sends messages over a WS that never appears as an HTTP request.
 - `ARCHITECTURE.en.md`: full English translation of the architecture document,
@@ -50,6 +54,10 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- **A replayed send could have been reported as `not_sent` after delivery.** The
+  gateway nests its verdict in a JSON string, so the acceptance marker arrives
+  with escaped quotes; matching raw text missed it while the message had in fact
+  been sent. `parse_ack` normalises the escapes first.
 - **The architecture notes had the send path wrong.** They claimed the send is
   issued by a service worker and that Lightspeed frames carry no readable body.
   Per-session capture shows the frame on the **page** session and the text in

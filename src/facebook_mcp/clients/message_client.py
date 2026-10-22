@@ -47,6 +47,7 @@ from ..session.manager import SessionManager
 from ..transport.base import Transport
 from ..transport.browsing import BrowserTransport, cdp_from
 from .base import BaseClient
+from .lightspeed_client import LightspeedError, LightspeedSender
 from .profile_client import ProfileClient
 
 logger = get_logger(__name__)
@@ -208,6 +209,7 @@ class MessageClient(BaseClient):
     ) -> None:
         super().__init__(transport, session, settings)
         self._profiles = profile_client
+        self._lightspeed = LightspeedSender(settings, session) if settings is not None else None
 
     # --- public API -----------------------------------------------------
 
@@ -218,6 +220,12 @@ class MessageClient(BaseClient):
             raise ValueError("message text must not be empty")
 
         uid = self.resolve_recipient(recipient)
+
+        if self._protocol_enabled():
+            over_protocol = self._send_over_protocol(uid, text)
+            if over_protocol is not None:
+                return over_protocol
+
         cdp = self._require_browser()
 
         thread_id, composer_target = self._open_thread(cdp, uid)
@@ -275,6 +283,36 @@ class MessageClient(BaseClient):
         raise UnsupportedError(
             "Messenger sends go through Facebook's service worker / Lightspeed "
             "WebSocket, not a page-level GraphQL mutation. Use the browser path."
+        )
+
+    # --- protocol path --------------------------------------------------
+
+    def _protocol_enabled(self) -> bool:
+        mode = self._settings.message_transport if self._settings else "auto"
+        return mode in ("lightspeed", "auto") and self._lightspeed is not None
+
+    def _send_over_protocol(self, uid: str, text: str) -> SendResult | None:
+        """Try the WebSocket path; ``None`` means "fall back to the UI".
+
+        A rejected send is *not* a fallback case: the server saw the message and
+        refused it, so repeating it through the UI would only duplicate that.
+        """
+        assert self._lightspeed is not None
+        try:
+            ack = self._lightspeed.send(uid, text)
+        except SendRejectedError:
+            raise
+        except LightspeedError as exc:
+            if self._settings and self._settings.message_transport == "lightspeed":
+                raise
+            logger.info("lightspeed unavailable (%s); falling back to the UI", exc)
+            return None
+
+        return SendResult(
+            ok=True,
+            delivery="submitted",
+            thread_id=uid,
+            message_id=ack.message_id,
         )
 
     # --- browser plumbing -----------------------------------------------

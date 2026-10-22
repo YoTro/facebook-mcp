@@ -25,14 +25,23 @@ Design docs: [ARCHITECTURE.en.md](./ARCHITECTURE.en.md) (English) · [ARCHITECTU
 
 All five tools work against the live site.
 
-### Why `send_message` needs a browser
+### How `send_message` works
 
-Messenger's web app issues the send from its **service worker**, and typing/sync
-traffic runs over a binary Lightspeed WebSocket whose frames contain no readable
-message body. There is no page-level GraphQL mutation to replay, and the legacy
-`/ajax/mercury/send_messages.php` endpoint is gone (404). So `send_message` drives
-the real Messenger UI through CDP (type → click send → confirm the composer clears).
-See `ARCHITECTURE.en.md` §8.3 for the evidence.
+Messages travel over `wss://gateway.facebook.com/ws/lightspeed` (JSON tasks in a
+16-byte binary frame) — not over HTTP and not via a service worker. The protocol
+is implemented: connect with the account's cookies, post the thread-context
+queries, then task 46; the server answers `replaceOptimsiticMessage` with a real
+`message_id`.
+
+```bash
+FB_MESSAGE_TRANSPORT=lightspeed   # protocol only (no browser, no fallback)
+FB_MESSAGE_TRANSPORT=auto         # protocol first, UI fallback (default)
+FB_MESSAGE_TRANSPORT=ui           # legacy CDP-driven DOM path
+```
+
+The UI path remains as a fallback (and captures the browser-side behaviour), but
+sending no longer needs a browser. See `ARCHITECTURE.en.md` §8.3 for the frame
+layout and the warm-up that the server requires.
 
 ## Install
 
@@ -193,7 +202,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (313 tests, fully offline) |
+| `make test` | `pytest -q` (324 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

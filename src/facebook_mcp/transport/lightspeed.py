@@ -178,3 +178,72 @@ def build_send_body(
 def encode_send(body: dict[str, Any], request_id: int) -> bytes:
     """Serialize a send envelope into a socket frame."""
     return build_frame(request_id, json.dumps(body, separators=(",", ":")).encode("utf-8"))
+
+
+WARMUP_TASKS: tuple[tuple[str, str, str], ...] = (
+    ("54", "insert_persistent_menu_ctas", "thread_key"),
+    ("117", "insert_persistent_menu_items", "thread_key"),
+    ("767", "fetch_custom_thread_commands", "thread_key"),
+)
+"""Thread-context fetches Messenger performs before it can send.
+
+Verified by replay: a connection that posts task 46 without these gets
+``markOptimisticMessageFailed / "Couldn't send."``; with them the server answers
+``replaceOptimsiticMessage`` and a real ``mid.$…``. They are ordinary fetches
+(menus, custom commands, contact profile questions), not session-bound
+subscriptions, so they can be constructed from the thread key alone.
+"""
+
+
+def warmup_task_batches(thread_id: str, uid: str) -> list[list[dict[str, Any]]]:
+    """Build the pre-send task batches, one envelope each."""
+    key = int(thread_id)
+    batches: list[list[dict[str, Any]]] = []
+    task_id = 0
+    for label, queue, field in WARMUP_TASKS:
+        batches.append(
+            [
+                {
+                    "failure_count": None,
+                    "label": label,
+                    "payload": json.dumps({field: key}, separators=(",", ":")),
+                    "queue_name": queue,
+                    "task_id": task_id,
+                }
+            ]
+        )
+        task_id += 1
+
+    # Contact profile questions for both sides of the conversation.
+    batches.append(
+        [
+            {
+                "failure_count": None,
+                "label": "207",
+                "payload": json.dumps({"contact_id": contact}, separators=(",", ":")),
+                "queue_name": "cpq_v2",
+                "task_id": task_id + offset,
+            }
+            for offset, contact in enumerate((key, int(uid)))
+        ]
+    )
+    return batches
+
+
+def build_envelope(
+    tasks: list[dict[str, Any]], *, request_id: int, version_id: str
+) -> dict[str, Any]:
+    """Wrap ``tasks`` in the payload/outer envelope (epoch is per send)."""
+    import random as _random
+
+    payload = {
+        "epoch_id": _random.getrandbits(63),
+        "tasks": tasks,
+        "version_id": version_id,
+    }
+    return {
+        "app_id": APP_ID,
+        "payload": json.dumps(payload, separators=(",", ":")),
+        "request_id": request_id,
+        "type": 3,
+    }

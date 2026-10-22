@@ -201,8 +201,10 @@ class FakeCdp:
 
 
 def _client(transport, **kwargs) -> MessageClient:
+    # message_transport="ui": these tests exercise the DOM path and must never
+    # reach the gateway (tests are offline by contract).
     session = SessionManager(Settings(cookie="c_user=1; xs=2", cookie_file=None))
-    return MessageClient(transport, session, Settings(), **kwargs)
+    return MessageClient(transport, session, Settings(message_transport="ui"), **kwargs)
 
 
 def _page_client(transport, **kwargs) -> MessageClient:
@@ -211,7 +213,7 @@ def _page_client(transport, **kwargs) -> MessageClient:
         Settings(cookie="c_user=100000000000001; xs=2; i_user=1", cookie_file=None)
     )
     assert session.state.acting_as_page is True
-    return MessageClient(transport, session, Settings(), **kwargs)
+    return MessageClient(transport, session, Settings(message_transport="ui"), **kwargs)
 
 
 # --- happy path ---------------------------------------------------------

@@ -18,7 +18,7 @@
 | 获取最近帖子列表 | `get_user_recent_posts` | 同上 | 否(公开) | ✅ |
 | 关键词搜索:人 | `search_people` | `/search/people?q=pest%20control` | **是** | ✅ |
 | 关键词搜索:主页 | `search_pages` | `/search/pages?q=pest%20control` | **是** | ✅ |
-| 发送消息 (Messenger) | `send_message` | 给某用户/主页发私信 | **是 + 浏览器** | ✅ |
+| 发送消息 (Messenger) | `send_message` | 给某用户/主页发私信 | **是**(协议优先,UI 回退) | ✅ |
 
 > **授权说明**:本项目仅用于**自有账号 / 已获授权**平台的自动化与接口对接。
 > 发送消息、搜索等行为需遵守 Facebook 平台条款与当地法律(反垃圾消息、隐私法规等)。
@@ -203,10 +203,10 @@ facebook-mcp/
 │   ├── check_layers.py              # 校验分层依赖与循环引用
 │   ├── smoke_mcp.py                 # MCP stdio 握手 + tools/list 冒烟测试
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
-│   ├── lightspeed_probe.py          # 纯 Python 直连 Lightspeed WS 的协议探针
+│   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 313 项测试(全部离线)
+└── tests/                           # 324 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -436,7 +436,10 @@ class Transport(Protocol):
     会被误判为拒绝。
     发送前后各数一次,只有**新增**才算拒绝,避免历史失败污染后续发送;
     同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
-  - `send_via_graphql()`:保留的协议化入口,**当前显式抛 `UnsupportedError`** 并说明原因
+  - **协议优先**:`send()` 先尝试 `LightspeedSender`(WebSocket,无需浏览器);
+    仅在通道不可用时回退到上面的 UI 流程(`FB_MESSAGE_TRANSPORT=auto`)。
+    协议路径返回真实 `message_id`,UI 路径没有服务端回执
+  - `send_via_graphql()`:页面级 GraphQL mutation **不存在**,保留为显式死路口
 
 ### 5.6 L4 services
 
@@ -797,15 +800,27 @@ body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
     task 46 = 发消息(thread_id/otid/text/…),task 21 = 标记已读
 ```
 
-**当前状态**:通道、帧头、task 信封均已确认;用 cookie 直连
-`wss://gateway.facebook.com/ws/lightspeed` 能收到服务器对**我们 otid** 的回执,
-但回执是 `markOptimisticMessageFailed / "Couldn't send."` —— 说明还缺一项会话状态
-(最可能是 `version_id`,即队列的 sync version,新连接无法凭空构造)。
-复现工具:`tools/lightspeed_probe.py`(默认不接线到 `send_message`);抓帧用
-`tools/sniff.py --websocket`。
+**已跑通(无需浏览器)**:发送前必须先发一组**线程上下文查询**,否则服务器一律回
+`markOptimisticMessageFailed / "Couldn't send."`。它们是普通 task,可用 thread_key
+自建(不需要会话订阅):
 
-→ 因此 `send_message` **仍**采用 CDP 驱动真实 UI,但难点已从"协议不可知"缩小为
-"一个版本号的来源"。
+| label | queue | payload |
+|---|---|---|
+| 54 | `insert_persistent_menu_ctas` | `{"thread_key": <thread>}` |
+| 117 | `insert_persistent_menu_items` | `{"thread_key": <thread>}` |
+| 767 | `fetch_custom_thread_commands` | `{"thread_key": <thread>}` |
+| 207 | `cpq_v2` | `{"contact_id": <thread>}` + `{"contact_id": <自己 uid>}` |
+
+之后发 label 46,服务器回 `replaceOptimsiticMessage` + 真实 `mid.$…`。
+
+关于 `version_id`:跨线程、跨会话实测都是同一个值 `39529440880004510`,说明它是
+**客户端构建标识而非队列状态**,可以直接作为常量。
+
+实现:`clients/lightspeed_client.py`(连接 → 预热 → 发送 → 解析回执),
+帧编解码在 `transport/lightspeed.py`。`send_message` 现在**协议优先**:
+`FB_MESSAGE_TRANSPORT=auto` 时先走 WebSocket,连不上才回退到 CDP UI 路径;
+`ui` 强制旧路径,`lightspeed` 强制协议且禁止回退。协议路径还会带回服务端
+`message_id`,这是 UI 路径拿不到的。
 
 **actor 类型会影响 UI**:以 Page 身份操作时,Facebook 进入 page inbox 而不是个人
 Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不能主动发起会话)。
@@ -919,7 +934,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(313 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(324 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -964,7 +979,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:313 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:324 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

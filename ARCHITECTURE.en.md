@@ -21,7 +21,7 @@
 | Recent posts | `get_user_recent_posts` | same | no (public) | ✅ |
 | Keyword search: people | `search_people` | `/search/people?q=pest%20control` | **yes** | ✅ |
 | Keyword search: pages | `search_pages` | `/search/pages?q=pest%20control` | **yes** | ✅ |
-| Send a message (Messenger) | `send_message` | DM to a user/page | **yes + browser** | ✅ |
+| Send a message (Messenger) | `send_message` | DM to a user/page | **yes** (protocol first, UI fallback) | ✅ |
 
 > **Authorization**: this project is meant for automating accounts you own or are
 > authorized to operate. Sending messages and searching must comply with
@@ -224,7 +224,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 313 tests (all offline)
+└── tests/                           # 324 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -500,8 +500,12 @@ layer (`base.py` only defines dataclasses).
     an older failure cannot taint a later send. The same bubble's accessibility
     label still says "Message sent", which is why the text cannot be used to
     confirm delivery.
-  - `send_via_graphql()`: a retained protocol entry point that currently raises
-    `UnsupportedError` and explains why
+  - **protocol first**: `send()` tries `LightspeedSender` (WebSocket, no browser)
+    and only falls back to the UI flow above when the channel is unusable
+    (`FB_MESSAGE_TRANSPORT=auto`). The protocol path returns the server's
+    `message_id`; the UI path has no acknowledgement to read
+  - `send_via_graphql()`: no page-level GraphQL mutation exists, so this stays an
+    explicit dead end
 
 ### 5.6 L4 services
 
@@ -881,17 +885,31 @@ body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
     task 46 = send message (thread_id/otid/text/…), task 21 = mark read
 ```
 
-**Where it stands**: channel, framing and task envelope are confirmed. A plain
-cookie-authenticated connection to the gateway does receive a reply naming *our*
-`otid`, but the reply is `markOptimisticMessageFailed / "Couldn't send."` — one
-piece of session state is still missing, most likely `version_id` (the queue's
-sync version, which a fresh connection cannot invent). Reproduce with
-`tools/lightspeed_probe.py` (deliberately not wired into `send_message`); capture
-frames with `tools/sniff.py --websocket`.
+**Working, no browser required**: a send must be preceded by a set of
+**thread-context queries**, otherwise the server always answers
+`markOptimisticMessageFailed / "Couldn't send."`. They are ordinary tasks that can
+be built from the thread key alone (no session subscription needed):
 
-→ `send_message` therefore **still** drives the real UI through CDP, but the open
-question has shrunk from "unknown protocol" to "where does one version number come
-from".
+| label | queue | payload |
+|---|---|---|
+| 54 | `insert_persistent_menu_ctas` | `{"thread_key": <thread>}` |
+| 117 | `insert_persistent_menu_items` | `{"thread_key": <thread>}` |
+| 767 | `fetch_custom_thread_commands` | `{"thread_key": <thread>}` |
+| 207 | `cpq_v2` | `{"contact_id": <thread>}` + `{"contact_id": <own uid>}` |
+
+Then task 46, and the server replies `replaceOptimsiticMessage` with a real
+`mid.$…`.
+
+On `version_id`: it was identical across threads and sessions
+(`39529440880004510`), so it identifies the client build rather than any queue —
+it can be a constant.
+
+Implementation: `clients/lightspeed_client.py` (connect → warm-up → send → parse the
+verdict), with the codec in `transport/lightspeed.py`. `send_message` is now
+**protocol-first**: with `FB_MESSAGE_TRANSPORT=auto` it tries the WebSocket and
+only falls back to the CDP UI path when the channel is unusable; `ui` forces the
+old path and `lightspeed` forbids the fallback. The protocol path also returns the
+server's `message_id`, which the UI path cannot obtain.
 
 **The actor type changes the UI**: while acting as a Page, Facebook opens the page
 inbox instead of personal Messenger and does **not** render the `Message` button
@@ -1020,7 +1038,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (313), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (324), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1068,7 +1086,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 313 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 324 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

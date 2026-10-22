@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # `proxy` is unset and no *_proxy env var is present.
     proxy_from_system: bool = True
 
+    # --- messaging -----------------------------------------------------------
+    # lightspeed: protocol-level send over the Messenger sync WebSocket
+    # ui:         drive the Messenger DOM through CDP (fallback)
+    # auto:       lightspeed first, UI when the protocol path cannot be used
+    message_transport: Literal["lightspeed", "ui", "auto"] = "auto"
+
     # --- rate limiting -------------------------------------------------------
     min_request_interval: float = 2.0  # seconds between requests
 
