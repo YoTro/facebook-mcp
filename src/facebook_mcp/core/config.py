@@ -45,7 +45,10 @@ class Settings(BaseSettings):
     user_agent: str | None = None  # optional UA override
 
     # --- cdp -----------------------------------------------------------------
-    cdp_url: str = "http://127.0.0.1:9222"
+    # ``None`` means "no browser is bound to this account": the global value
+    # describes FB_ACCOUNT only, and services/factory.py clears it for any other
+    # account that has no cdp_url of its own.
+    cdp_url: str | None = "http://127.0.0.1:9222"
     # Page the transport attaches to; requests run inside this origin so the
     # browser's own cookies/headers are used.
     cdp_page_url: str = "https://www.facebook.com/"

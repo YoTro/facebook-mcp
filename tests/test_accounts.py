@@ -310,3 +310,56 @@ def test_another_account_uses_its_own_cookie_file(
     settings = factory.build_settings("work")
     session = SessionManager(settings)
     assert session.state.user_id == "222"
+
+
+def test_foreign_account_does_not_inherit_the_global_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FB_CDP_URL belongs to FB_ACCOUNT; borrowing it would leak its identity.
+
+    The auto transport bootstraps cookies from whatever browser cdp_url points
+    at, so a foreign account without its own binding must have no browser at all.
+    """
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    monkeypatch.setenv("FB_CDP_URL", "http://127.0.0.1:9222")
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    AccountPaths.for_account("work", tmp_path).ensure()
+
+    assert factory.build_settings(None).cdp_url == "http://127.0.0.1:9222"
+    assert factory.build_settings("work").cdp_url is None, (
+        "account 'work' inherited the default account's browser"
+    )
+
+
+def test_own_cdp_url_still_wins_for_a_foreign_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    from facebook_mcp.services import factory
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    AccountPaths.for_account("work", tmp_path).merge_meta(cdp_url="http://127.0.0.1:9333")
+    assert factory.build_settings("work").cdp_url == "http://127.0.0.1:9333"
+
+
+def test_unbound_browser_fails_with_an_actionable_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    from facebook_mcp.services import factory
+    from facebook_mcp.transport.cdp import CdpError, CdpTransport
+
+    factory.get_settings.cache_clear()
+    factory._services_for.cache_clear()
+
+    settings = factory.build_settings("work")
+    transport = CdpTransport(settings)
+    with pytest.raises(CdpError, match="no browser is bound to account 'work'"):
+        transport.cookies()
+    transport.close() if hasattr(transport, "close") else None

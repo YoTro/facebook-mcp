@@ -123,3 +123,35 @@ def test_sniff_attaches_to_the_selected_account(
         sys.stderr = sys.__stderr__
 
     assert seen == ["http://127.0.0.1:9333"]
+
+
+def test_export_cookies_honours_home_for_browser_selection(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--home selects the credential root; the browser must follow it."""
+    import export_cookies
+
+    other = tmp_path / "other-home"
+    work = other / "accounts" / "work"
+    work.mkdir(parents=True)
+    (work / "account.json").write_text(
+        json.dumps({"cdp_url": "http://127.0.0.1:9444"}), encoding="utf-8"
+    )
+
+    seen: list[str] = []
+
+    class _StubTransport:
+        def __init__(self, settings) -> None:
+            seen.append(settings.cdp_url)
+
+        def cookies(self, url: str | None = None) -> dict[str, str]:
+            return {"c_user": "7", "xs": "t"}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(export_cookies, "CdpTransport", _StubTransport)
+
+    assert export_cookies.main(["--account", "work", "--home", str(other)]) == 0
+    assert seen == ["http://127.0.0.1:9444"], "the global home chose the browser"
+    assert (work / "cookies.txt").is_file()

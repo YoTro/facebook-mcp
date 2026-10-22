@@ -58,9 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = AccountPaths.for_account(args.account, home)
 
     # build_settings() merges the per-account overrides from account.json, so
-    # --account also selects *which browser* to read. Using get_settings() here
-    # silently exported from whichever Chrome FB_ACCOUNT pointed at.
-    settings = build_settings(args.account)
+    # --account also selects *which browser* to read — and --home selects which
+    # credential root that account.json comes from. Reading either from the
+    # global settings silently exported from the wrong account's browser.
+    settings = build_settings(args.account, home=str(home))
     transport = CdpTransport(settings)
     try:
         cookies = transport.cookies(args.url)

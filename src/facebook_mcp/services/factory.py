@@ -16,7 +16,7 @@ from functools import lru_cache
 from ..clients.message_client import MessageClient
 from ..clients.profile_client import ProfileClient
 from ..clients.search_client import SearchClient
-from ..core.accounts import AccountPaths
+from ..core.accounts import AccountPaths, resolve_home
 from ..core.config import Settings, get_settings
 from ..core.logger import get_logger
 from ..session.manager import SessionManager
@@ -30,21 +30,27 @@ from .search_service import SearchService
 logger = get_logger(__name__)
 
 
-def build_settings(account: str | None = None) -> Settings:
+def build_settings(account: str | None = None, *, home: str | None = None) -> Settings:
     """Return settings for ``account``, applying per-account overrides.
 
     ``account.json`` may carry ``cdp_url`` so each account can bind to its own
     Chrome instance (separate profile + port) for browser-backed operations,
     and ``doc_ids`` so a re-captured GraphQL ``doc_id`` takes effect without
     editing ``routes/graphql.py``.
+
+    ``home`` overrides the credential root (``tools/* --home``); without it the
+    global ``FB_HOME`` applies.
     """
     base = get_settings()
+    if home:
+        base = base.model_copy(update={"home": str(resolve_home(home))})
+
     if account and account != base.account:
-        # Global FB_COOKIE / FB_COOKIE_FILE describe the identity of FB_ACCOUNT,
-        # not of every account. Letting them through would make account="work"
-        # act as whoever owns the global jar, and because a cookie file outranks
-        # the account store (session/manager.py) the "isolation" of the account
-        # directory would not match the identity actually in use.
+        # Everything global describes the identity of FB_ACCOUNT, not of every
+        # account. Cookies would make account="work" act as whoever owns the
+        # global jar; cdp_url would make it *borrow the other account's browser*
+        # and bootstrap that browser's cookies through the CDP provider. Both are
+        # dropped; an account may only use a browser bound to itself.
         if base.cookie or base.cookie_file:
             logger.warning(
                 "account %r: ignoring the global FB_COOKIE / FB_COOKIE_FILE "
@@ -52,7 +58,14 @@ def build_settings(account: str | None = None) -> Settings:
                 account,
                 base.account,
             )
-        base = base.model_copy(update={"account": account, "cookie": None, "cookie_file": None})
+        base = base.model_copy(
+            update={
+                "account": account,
+                "cookie": None,
+                "cookie_file": None,
+                "cdp_url": None,
+            }
+        )
 
     paths = AccountPaths.for_account(base.account, base.home)
     meta = paths.load_meta()

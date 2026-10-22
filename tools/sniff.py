@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="account whose cdp_url to attach to (default: FB_ACCOUNT)",
     )
+    parser.add_argument("--home", default=None, help="credential root (default: FB_HOME)")
     parser.add_argument(
         "--navigate",
         default=None,
@@ -101,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     # build_settings() applies the account's cdp_url from account.json; plain
     # get_settings() would attach to the global FB_CDP_URL and capture from the
     # wrong browser when several accounts run side by side.
-    settings = build_settings(args.account)
+    settings = build_settings(args.account, home=args.home)
     transport = CdpTransport(settings)
 
     try:
@@ -235,7 +236,7 @@ def _capture(
     instead would lose everything that arrived during ``Page.navigate()``.
     """
     while time.monotonic() < deadline:
-        for message in transport.drain_events(timeout=0.8):  # type: ignore[attr-defined]
+        for message in transport.drain_events(timeout=0.8, deadline=deadline):  # type: ignore[attr-defined]
             entry = _entry_from_event(message, url_contains)
             if entry is not None:
                 on_entry(entry)
