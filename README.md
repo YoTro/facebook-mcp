@@ -265,6 +265,10 @@ Subject: imperative, lowercase, no trailing period, header ≤ 72 chars.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full rules and examples.
 
+> Pushing over SSH? Use a repo-scoped deploy key
+> (`~/.ssh/github-action-key-*`, `0600`, never committed, one repo per key).
+> CI needs none: `actions/checkout` uses the built-in `GITHUB_TOKEN`.
+
 ## License
 
 [MIT](./LICENSE) © facebook-mcp contributors
