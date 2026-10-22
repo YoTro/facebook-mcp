@@ -6,7 +6,12 @@ import pytest
 
 from facebook_mcp.clients.message_client import MessageClient
 from facebook_mcp.core.config import Settings
-from facebook_mcp.core.exceptions import FacebookError, ParseError, UnsupportedError
+from facebook_mcp.core.exceptions import (
+    FacebookError,
+    ParseError,
+    SendUncertainError,
+    UnsupportedError,
+)
 from facebook_mcp.core.models import Profile
 from facebook_mcp.session.manager import SessionManager
 from facebook_mcp.transport.factory import HybridTransport
@@ -49,6 +54,8 @@ class FakeCdp:
         thread_row: bool = True,
         message_button: bool = True,
         live_cookies: dict[str, str] | None = None,
+        composer_target: str | None = None,
+        redirect_thread: str | None = None,
         draft: str = "",
         vanish_after_send: bool = False,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
@@ -62,6 +69,8 @@ class FakeCdp:
         self.thread_row = thread_row
         self.message_button = message_button
         self.live_cookies = live_cookies or {}
+        self.composer_target = composer_target
+        self.redirect_thread = redirect_thread
         self.draft = draft
         self.vanish_after_send = vanish_after_send
         self.url = url
@@ -83,7 +92,12 @@ class FakeCdp:
     def navigate(self, url: str, timeout: float | None = None) -> None:
         self.navigations.append(url)
         if "/messages/t/" in url:
-            self.url = url
+            if self.redirect_thread:
+                # Facebook sometimes answers /messages/t/<uid>/ with a different
+                # conversation; the client must notice.
+                self.url = f"https://www.facebook.com/messages/t/{self.redirect_thread}/"
+            else:
+                self.url = url
             self.composer_open = self.composer_on_thread
             self.composer_text = self.draft
         elif "profile.php" in url:
@@ -119,6 +133,10 @@ class FakeCdp:
             if params.get("type") == "mousePressed":
                 self.mouse_clicks += 1
                 self.composer_open = self.composer_after_profile
+                if self.composer_after_profile:
+                    # Clicking "Message" opens a brand-new thread, whose id is
+                    # not the recipient's uid.
+                    self.url = "https://www.facebook.com/messages/t/300000000000001/"
             return {}
         return {}
 
@@ -138,7 +156,7 @@ class FakeCdp:
                 return False
             self.composer_open = self.composer_after_row_click
             return True
-        if "return !!(composer || sendButton)" in expression:
+        if "return !!composer" in expression:
             return self.composer_open
         if "sendButton.click()" in expression:
             if not self.send_button:
@@ -149,6 +167,8 @@ class FakeCdp:
                 if self.vanish_after_send:
                     self.composer_open = False
             return True
+        if "return composerTarget" in expression:
+            return self.composer_target
         if "composer.innerText" in expression:
             return self.composer_text if self.composer_open else None
         return None
@@ -207,8 +227,8 @@ def test_send_starts_new_conversation_from_profile() -> None:
     assert cdp.navigations[0] == "https://www.facebook.com/messages/t/100000000000003/"
     assert cdp.navigations[-1] == "https://www.facebook.com/profile.php?id=100000000000003"
     assert cdp.mouse_clicks == 1
-    # The URL never became a thread, so the uid is reported back.
-    assert result.thread_id == "100000000000003"
+    # A brand-new conversation gets its own thread id, not the recipient's uid.
+    assert result.thread_id == "300000000000001"
 
 
 # --- failure modes ------------------------------------------------------
@@ -320,8 +340,9 @@ def test_composer_rejects_text_aborts_before_send() -> None:
 
 
 def test_not_cleared_reports_delivery_doubt() -> None:
+    """The click happened but the box still holds text: outcome unknown."""
     cdp = FakeCdp(composer_on_thread=True, clears_after_send=False)
-    with pytest.raises(FacebookError, match="may not have been delivered"):
+    with pytest.raises(SendUncertainError, match="may have been sent"):
         _client(cdp).send("200000000000001", "hi")
 
 
@@ -350,13 +371,14 @@ def test_graphql_path_is_documented_as_unavailable() -> None:
 
 
 class _StubProfiles:
-    def __init__(self, uid: str = "100000000000001") -> None:
+    def __init__(self, uid: str = "100000000000001", name: str | None = None) -> None:
         self.resolved: list[str] = []
         self._uid = uid
+        self._name = name
 
     def resolve(self, username: str) -> Profile:
         self.resolved.append(username)
-        return Profile(uid=self._uid, username=username)
+        return Profile(uid=self._uid, username=username, display_name=self._name)
 
 
 def test_recipient_numeric_passthrough() -> None:
@@ -431,6 +453,7 @@ def test_service_returns_ok() -> None:
     service = MessageService(_client(FakeCdp()))
     result = service.send_message("200000000000001", "hi")
     assert result.ok is True
+    assert result.delivery == "submitted"
 
 
 def test_mcp_tool_registered() -> None:
@@ -508,5 +531,77 @@ def test_whitespace_only_draft_is_not_a_draft() -> None:
 def test_vanished_composer_is_not_success() -> None:
     """A re-render removes the composer too; that is not proof of delivery."""
     cdp = FakeCdp(composer_on_thread=True, vanish_after_send=True)
-    with pytest.raises(ParseError, match="disappeared after sending"):
+    with pytest.raises(SendUncertainError, match="disappeared after sending"):
         _client(cdp).send("200000000000001", "hello")
+
+
+# --- recipient verification ---------------------------------------------
+
+
+def test_refuses_when_facebook_redirects_to_another_thread() -> None:
+    """A composer answering for a different conversation must never be used."""
+    cdp = FakeCdp(composer_on_thread=True, redirect_thread="200000000000999")
+    with pytest.raises(ParseError, match="refusing to send"):
+        _client(cdp).send("200000000000001", "hi")
+    assert cdp.inserted == [], "text was typed into an unverified conversation"
+    assert cdp.sent is False
+
+
+def test_refuses_when_the_composer_belongs_to_someone_else() -> None:
+    """The 'Write to <name>' label is checked against the recipient's name."""
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        redirect_thread="200000000000999",
+        composer_target="Bob",
+    )
+    profiles = _StubProfiles(uid="200000000000001", name="Alice")
+    with pytest.raises(ParseError, match="does not match recipient"):
+        _client(cdp, profile_client=profiles).send("200000000000001", "hi")
+    assert cdp.sent is False
+
+
+def test_accepts_a_redirect_when_the_name_matches() -> None:
+    """New conversations legitimately have a thread id that is not the uid."""
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        redirect_thread="300000000000001",
+        composer_target="Alice Smith",
+    )
+    profiles = _StubProfiles(uid="200000000000001", name="Alice Smith")
+    result = _client(cdp, profile_client=profiles).send("200000000000001", "hi")
+    assert result.ok is True
+    assert result.thread_id == "300000000000001"
+
+
+def test_thread_row_matching_is_exact_not_substring() -> None:
+    cdp = FakeCdp(composer_on_thread=False, composer_after_row_click=True)
+    client = _client(cdp)
+    # The row matcher is JavaScript, so assert the expression the client sends.
+    captured: list[str] = []
+    cdp.evaluate = lambda expression, **kw: (captured.append(expression), True)[1]
+    client._click_thread_row(cdp, "123")
+    assert any("threadId(" in expr for expr in captured)
+    assert any("== target" in expr for expr in captured)
+
+
+# --- delivery states ----------------------------------------------------
+
+
+def test_uncertain_send_is_reported_as_unknown() -> None:
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(composer_on_thread=True, clears_after_send=False)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
+    assert result.ok is False
+    assert result.delivery == "unknown"
+    assert "may have been sent" in (result.error or "")
+
+
+def test_failure_before_the_click_is_reported_as_not_sent() -> None:
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(composer_on_thread=False, composer_after_row_click=False)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
+    assert result.ok is False
+    assert result.delivery == "not_sent"
+    assert cdp.sent is False

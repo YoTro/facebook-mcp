@@ -243,7 +243,7 @@ def test_message_ui_operations_are_paced() -> None:
     client = MessageClient(_NoopTransport(), SessionManager(Settings()), Settings())
     client._limiter = type("L", (), {"wait": lambda self: waits.append(1)})()  # type: ignore[assignment]
 
-    thread_id = client._open_thread(_FakeCdp(), "1234567890")
+    thread_id, _target = client._open_thread(_FakeCdp(), "1234567890")
     assert thread_id == "1234567890"
     assert waits, "UI navigation did not consult the limiter"
 
@@ -267,7 +267,7 @@ class _FakeCdp:
     def evaluate(self, expression: str, **kwargs: object) -> object:
         if "location.href" in expression:
             return self.url
-        if "return !!(composer || sendButton)" in expression:
+        if "return !!composer" in expression:
             return True
         return None
 

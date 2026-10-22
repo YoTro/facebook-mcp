@@ -73,6 +73,16 @@ class ParseError(TransportError):
     code = "parse_error"
 
 
+class SendUncertainError(FacebookError):
+    """The send was issued but its outcome cannot be verified.
+
+    Raised only after the UI was asked to send. Callers must **not** retry
+    blindly: the message may already be in the conversation.
+    """
+
+    code = "send_uncertain"
+
+
 class UnsupportedError(FacebookError):
     """The configured transport or account type cannot do this."""
 
