@@ -221,9 +221,10 @@ facebook-mcp/
 │   ├── check_layers.py              # verify the layering + detect import cycles
 │   ├── smoke_mcp.py                 # MCP stdio handshake + tools/list smoke test
 │   ├── commit_msg.py                # Conventional Commits validator (git hook + CI)
+│   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 304 tests (all offline)
+└── tests/                           # 313 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -860,13 +861,37 @@ curl_cffi; the browser is only needed for one-off cookie bootstrapping.
 | Hypothesis | How it was checked | Result |
 |---|---|---|
 | page-level GraphQL mutation | captured `Network.requestWillBeSent` | ❌ only `FBScreenTimeLogger_syncMutation` |
-| Lightspeed WebSocket | captured `Network.webSocketFrameSent` and base64-decoded | ❌ binary frames contain **no** message body |
-| `Fetch`-domain interception | page-level `Fetch.enable` + `*graphql*` | ❌ not interceptable — issued by the **service worker** |
 | legacy REST endpoint | `POST /ajax/mercury/send_messages.php` | ❌ 404 |
-| clue | `bootloader-endpoint` loads `LSBumpThread` / `LSReplaceOptimisticMessage` | Lightspeed sync path |
+| send is issued by a service worker | subscribed per session, decoded every frame | ❌ **earlier reading was wrong**: the frame belongs to the **page** session |
+| send travels over the Lightspeed WebSocket | `Network.webSocketFrameSent` + base64 decode | ✅ confirmed |
 
-→ The protocol cannot be forged cheaply, so `send_message` **drives the real UI
-through CDP**.
+**Corrected finding**: the message leaves as a **JSON task** on
+`wss://gateway.facebook.com/ws/lightspeed` (a WebSocket owned by the page), wrapped
+in a 16-byte binary header. The earlier "binary frames carry no body" conclusion
+came from decoding only one base64 layer and from not collecting frames across
+sessions; the text actually sits in `payload.tasks[0].payload.text`.
+
+Frame layout (verified byte-for-byte against a live frame; codec in
+`transport/lightspeed.py`):
+
+```
+0f | req_id(u16) | 02 00 00 | "{}" | 0d | req_id(u16) | u32(len(body)+2) | 80 | body
+body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
+  payload = {"epoch_id":…,"version_id":"…","data_trace_id":"…","tasks":[…]}
+    task 46 = send message (thread_id/otid/text/…), task 21 = mark read
+```
+
+**Where it stands**: channel, framing and task envelope are confirmed. A plain
+cookie-authenticated connection to the gateway does receive a reply naming *our*
+`otid`, but the reply is `markOptimisticMessageFailed / "Couldn't send."` — one
+piece of session state is still missing, most likely `version_id` (the queue's
+sync version, which a fresh connection cannot invent). Reproduce with
+`tools/lightspeed_probe.py` (deliberately not wired into `send_message`); capture
+frames with `tools/sniff.py --websocket`.
+
+→ `send_message` therefore **still** drives the real UI through CDP, but the open
+question has shrunk from "unknown protocol" to "where does one version number come
+from".
 
 **The actor type changes the UI**: while acting as a Page, Facebook opens the page
 inbox instead of personal Messenger and does **not** render the `Message` button
@@ -995,7 +1020,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (304), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (313), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1043,7 +1068,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 304 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 313 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

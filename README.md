@@ -193,7 +193,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (304 tests, fully offline) |
+| `make test` | `pytest -q` (313 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

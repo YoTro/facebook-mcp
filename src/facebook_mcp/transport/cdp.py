@@ -200,6 +200,85 @@ class CdpTransport(Transport):
                     ws.settimeout(previous_timeout)
         return buffered
 
+    def attach_to_children(self, *, enable_network: bool = True) -> list[dict[str, Any]]:
+        """Auto-attach to workers/iframes and return the attached target list.
+
+        Messenger's send is issued by a service worker. A page-level session
+        never reports those requests, so the capture tools have to subscribe to
+        every child target and enable the Network domain *inside* each one.
+
+        Flattened mode (``flatten=True``) keeps everything on the page socket and
+        tags events with a ``sessionId``.
+        """
+        sessions: dict[str, dict[str, Any]] = {}
+
+        def remember(message: dict[str, Any]) -> None:
+            if message.get("method") != "Target.attachedToTarget":
+                return
+            params = message.get("params") or {}
+            session_id = params.get("sessionId")
+            info = params.get("targetInfo") or {}
+            if not session_id:
+                return
+            sessions[session_id] = {
+                "sessionId": session_id,
+                "type": info.get("type"),
+                "url": info.get("url"),
+                "title": info.get("title"),
+            }
+
+        # Drain whatever the socket already buffered before we subscribe.
+        for event in self.drain_events(timeout=0.05):
+            remember(event)
+
+        self._send(
+            "Target.setAutoAttach",
+            {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+        )
+
+        # Existing targets (already-running service workers) do not fire
+        # attachedToTarget again, so attach to them explicitly.
+        for target in self._targets():
+            if target.get("type") in ("page", "browser", "tab"):
+                continue
+            try:
+                result = self._send(
+                    "Target.attachToTarget",
+                    {"targetId": target["id"], "flatten": True},
+                )
+            except CdpError as exc:
+                logger.debug("could not attach to %s: %s", target.get("type"), exc)
+                continue
+            session_id = result.get("sessionId")
+            if session_id:
+                sessions[session_id] = {
+                    "sessionId": session_id,
+                    "type": target.get("type"),
+                    "url": target.get("url"),
+                    "title": target.get("title"),
+                }
+
+        if enable_network:
+            for session_id in sessions:
+                try:
+                    self._send(
+                        "Network.enable",
+                        {"maxPostDataSize": 2 * 1024 * 1024},
+                        session_id=session_id,
+                    )
+                except CdpError as exc:
+                    logger.debug("Network.enable failed on %s: %s", session_id, exc)
+
+        return list(sessions.values())
+
+    def _targets(self) -> list[dict[str, Any]]:
+        targets = self._http_json("/json/list")
+        return (
+            [t for t in targets if isinstance(t, dict) and t.get("id")]
+            if isinstance(targets, list)
+            else []
+        )
+
     def close(self) -> None:
         if self._ws is not None:
             with contextlib.suppress(Exception):
@@ -299,14 +378,32 @@ class CdpTransport(Transport):
 
     # --- protocol plumbing ----------------------------------------------
 
-    def _send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Send one command, skipping interleaved events, and return its result."""
+    def _send(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Send one command, skipping interleaved events, and return its result.
+
+        ``session_id`` addresses an attached child target (a service worker or
+        iframe) in flattened mode. Page sessions cannot see requests issued by a
+        service worker, so capturing a Messenger send requires this.
+        """
         ws = self._connect()
         message_id = self._next_id
         self._next_id += 1
 
+        envelope: dict[str, Any] = {
+            "id": message_id,
+            "method": method,
+            "params": params or {},
+        }
+        if session_id:
+            envelope["sessionId"] = session_id
         try:
-            ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+            ws.send(json.dumps(envelope))
         except Exception as exc:
             self.close()
             raise CdpError(f"failed to send {method}: {exc}") from exc

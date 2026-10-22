@@ -73,6 +73,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--home", default=None, help="credential root (default: FB_HOME)")
     parser.add_argument(
+        "--websocket",
+        action="store_true",
+        help=(
+            "also capture WebSocket URLs and frames. Messenger sends messages over "
+            "wss://gateway.facebook.com/ws/lightspeed, which never shows up as an "
+            "HTTP request"
+        ),
+    )
+    parser.add_argument(
+        "--frames-dir",
+        default=".cache/ws-frames",
+        help="where --websocket writes decoded binary frames",
+    )
+    parser.add_argument(
         "--navigate",
         default=None,
         help="navigate the page to this URL first (e.g. a search URL)",
@@ -124,13 +138,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capturing for {args.seconds:.0f}s — now use Facebook in the browser:")
     print("  • open a profile timeline          (ProfileCometTimelineFeed*)")
     print("  • run a people/page search          (SearchCometResults*)")
-    print(
-        "  • send a Messenger message          (sent by the service worker, so a\n"
-        "                                       mutation may never appear here)"
-    )
+    print("  • send a Messenger message          (needs --websocket: it travels over")
+    print("                                       wss://gateway.facebook.com/ws/lightspeed)")
     print()
 
     captured: dict[str, dict[str, object]] = {}
+    frames: list[dict[str, object]] = []
     deadline = time.monotonic() + args.seconds
 
     def on_entry(entry: dict[str, object]) -> None:
@@ -149,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    variables : {json.dumps(entry['variables'])[:140]}\n")
 
     _capture(transport, deadline, args.url_contains, on_entry)
+
+    if args.websocket:
+        print(f"\ncaptured {len(frames)} websocket event(s)")
 
     print(f"\ncaptured {len(captured)} unique route(s)")
     if captured:
@@ -195,6 +211,60 @@ def _save_template(friendly_name: str, variables: object) -> Path | None:
     payload["cursor"] = '{"page_number":{page_number},"flow_cursors_serialized":{}}'
     _write_atomic(target, json.dumps(payload, indent=2, sort_keys=True))
     return target
+
+
+def _record_websocket(
+    message: dict[str, object], frames: list[dict[str, object]], directory: Path
+) -> None:
+    """Record one WebSocket event; binary frames are also written to disk.
+
+    Lightspeed frames are binary with a 16-byte header (see
+    ``facebook_mcp.transport.lightspeed``), so the payload is decoded from base64
+    and saved rather than printed.
+    """
+    import base64
+
+    params = message.get("params") or {}
+    method = str(message.get("method"))
+    session = message.get("sessionId") or "page"
+
+    if method == "Network.webSocketCreated":
+        entry = {"event": "open", "session": session, "url": params.get("url", "")}
+        frames.append(entry)
+        print(f"  ws open   [{session}] {str(entry['url'])[:96]}")
+        return
+
+    response = params.get("response") or {}
+    payload = response.get("payloadData") or ""
+    opcode = response.get("opcode")
+    direction = "out" if method.endswith("Sent") else "in"
+    raw = b""
+    if opcode == 2:
+        try:
+            raw = base64.b64decode(payload)
+        except Exception:  # noqa: BLE001 - malformed frame
+            raw = b""
+        directory.mkdir(parents=True, exist_ok=True)
+        name = f"{int(time.time() * 1000)}-{direction}-{len(raw)}.bin"
+        (directory / name).write_bytes(raw)
+        detail = raw[:64].hex(" ")
+        text = raw[16:].decode("utf-8", "replace") if len(raw) > 16 else ""
+        frames.append(
+            {
+                "event": direction,
+                "session": session,
+                "bytes": len(raw),
+                "file": str(directory / name),
+                "body": text[:400],
+            }
+        )
+        if text.startswith("{"):
+            print(f"  ws {direction:<3} [{session}] {len(raw)}B {text[:110]}")
+        else:
+            print(f"  ws {direction:<3} [{session}] {len(raw)}B {detail}")
+    else:
+        frames.append({"event": direction, "session": session, "text": payload[:400]})
+        print(f"  ws {direction:<3} [{session}] text {payload[:110]}")
 
 
 def _entry_from_event(message: dict[str, object], url_contains: str) -> dict[str, object] | None:

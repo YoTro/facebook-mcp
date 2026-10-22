@@ -203,9 +203,10 @@ facebook-mcp/
 │   ├── check_layers.py              # 校验分层依赖与循环引用
 │   ├── smoke_mcp.py                 # MCP stdio 握手 + tools/list 冒烟测试
 │   ├── commit_msg.py                # Conventional Commits 校验(git hook + CI)
+│   ├── lightspeed_probe.py          # 纯 Python 直连 Lightspeed WS 的协议探针
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 304 项测试(全部离线)
+└── tests/                           # 313 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -778,12 +779,33 @@ jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))   # 实测 25724 == 25724
 | 假设 | 验证 | 结论 |
 |---|---|---|
 | 页面级 GraphQL mutation | 抓 `Network.requestWillBeSent` | ❌ 仅 `FBScreenTimeLogger_syncMutation` |
-| Lightspeed WebSocket | 抓 `Network.webSocketFrameSent` 并 base64 解码 | ❌ 二进制帧内**不含**消息正文 |
-| `Fetch` 域可拦截 | 页面目标 `Fetch.enable` + `*graphql*` | ❌ 拦不到 —— 由 **Service Worker** 发起 |
 | legacy REST 端点 | `POST /ajax/mercury/send_messages.php` | ❌ 404 |
-| 线索 | `bootloader-endpoint` 加载 `LSBumpThread` / `LSReplaceOptimisticMessage` | 走 Lightspeed 同步 |
+| 发送由 Service Worker 发起 | 按 session 分别订阅、逐帧解码 | ❌ **此前判断有误**:帧属于 **page** session |
+| 发送走 Lightspeed WebSocket | `Network.webSocketFrameSent` + base64 解码 | ✅ 命中 |
 
-→ 无法以低成本伪造协议,故 `send_message` 采用 **CDP 驱动真实 UI**。
+**实测修正(v3 结论)**:消息以 **JSON task** 经由
+`wss://gateway.facebook.com/ws/lightspeed`(页面持有的 WebSocket)发出,外层是
+16 字节二进制头。早期"二进制帧里没有正文"的结论,是因为当时只解了一层 base64 且
+没有跨 session 收集;实际上正文在 `payload.tasks[0].payload.text` 里。
+
+帧格式(已用真实帧**逐字节**验证,编解码在 `transport/lightspeed.py`):
+
+```
+0f | req_id(u16) | 02 00 00 | "{}" | 0d | req_id(u16) | u32(len(body)+2) | 80 | body
+body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
+  payload = {"epoch_id":…,"version_id":"…","data_trace_id":"…","tasks":[…]}
+    task 46 = 发消息(thread_id/otid/text/…),task 21 = 标记已读
+```
+
+**当前状态**:通道、帧头、task 信封均已确认;用 cookie 直连
+`wss://gateway.facebook.com/ws/lightspeed` 能收到服务器对**我们 otid** 的回执,
+但回执是 `markOptimisticMessageFailed / "Couldn't send."` —— 说明还缺一项会话状态
+(最可能是 `version_id`,即队列的 sync version,新连接无法凭空构造)。
+复现工具:`tools/lightspeed_probe.py`(默认不接线到 `send_message`);抓帧用
+`tools/sniff.py --websocket`。
+
+→ 因此 `send_message` **仍**采用 CDP 驱动真实 UI,但难点已从"协议不可知"缩小为
+"一个版本号的来源"。
 
 **actor 类型会影响 UI**:以 Page 身份操作时,Facebook 进入 page inbox 而不是个人
 Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不能主动发起会话)。
@@ -897,7 +919,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(304 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(313 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -942,7 +964,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:304 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:313 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
