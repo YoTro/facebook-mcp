@@ -10,7 +10,13 @@ from .factory import HybridTransport
 
 @runtime_checkable
 class BrowserTransport(Protocol):
-    """Structural contract for transports that can drive a live browser."""
+    """Structural contract for transports that can drive a live browser.
+
+    ``Transport`` covers HTTP-shaped requests; driving the UI needs a different
+    capability (run JS, navigate, dispatch input events, read live cookies).
+    Clients that need it depend on this protocol, never on a concrete class, so
+    the transport layer stays swappable.
+    """
 
     def evaluate(self, expression: str, **kwargs: Any) -> Any: ...
 
@@ -18,8 +24,10 @@ class BrowserTransport(Protocol):
 
     def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
+    def cookies(self, url: str | None = None) -> dict[str, str]: ...
 
-def cdp_from(transport: Transport) -> Any | None:
+
+def cdp_from(transport: Transport) -> BrowserTransport | None:
     """Return a browser-capable transport, or ``None``.
 
     Recognises both a direct CDP transport and the hybrid transport (whose

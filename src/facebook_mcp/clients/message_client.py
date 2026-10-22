@@ -32,14 +32,14 @@ from ..core.exceptions import (
     FacebookError,
     ParseError,
     SendUncertainError,
+    TransportError,
     UnsupportedError,
 )
 from ..core.logger import get_logger
 from ..core.models import SendResult
 from ..session.manager import SessionManager
 from ..transport.base import Transport
-from ..transport.browsing import cdp_from
-from ..transport.cdp import CdpError, CdpTransport
+from ..transport.browsing import BrowserTransport, cdp_from
 from .base import BaseClient
 from .profile_client import ProfileClient
 
@@ -189,7 +189,7 @@ class MessageClient(BaseClient):
 
     # --- browser plumbing -----------------------------------------------
 
-    def _require_browser(self) -> CdpTransport:
+    def _require_browser(self) -> BrowserTransport:
         cdp = cdp_from(self._transport)
         if cdp is None:
             raise UnsupportedError(
@@ -209,7 +209,7 @@ class MessageClient(BaseClient):
         if self._limiter is not None:
             self._limiter.wait()
 
-    def _open_thread(self, cdp: CdpTransport, uid: str) -> tuple[str, str | None]:
+    def _open_thread(self, cdp: BrowserTransport, uid: str) -> tuple[str, str | None]:
         """Open the conversation for ``uid`` and verify it is the right one.
 
         Returns ``(thread_id, composer_target)``; ``composer_target`` is the name
@@ -220,7 +220,7 @@ class MessageClient(BaseClient):
         self._pace()
         try:
             cdp.navigate(f"{MESSENGER_BASE}{uid}/", timeout=45.0)
-        except CdpError as exc:
+        except TransportError as exc:
             raise FacebookError(f"could not open Messenger thread for {uid}: {exc}") from exc
 
         if self._wait_for_composer(cdp, timeout=12):
@@ -255,7 +255,7 @@ class MessageClient(BaseClient):
 
     def _confirm_thread(
         self,
-        cdp: CdpTransport,
+        cdp: BrowserTransport,
         uid: str,
         *,
         how: str,
@@ -329,7 +329,7 @@ class MessageClient(BaseClient):
             return None
         return profile.display_name
 
-    def _acting_as_page(self, cdp: CdpTransport) -> bool:
+    def _acting_as_page(self, cdp: BrowserTransport) -> bool:
         """Whether the *live* session is switched into a Page identity.
 
         ``state.cookies`` is a snapshot taken when the jar was exported, so an
@@ -341,7 +341,7 @@ class MessageClient(BaseClient):
         """
         try:
             live = cdp.cookies()
-        except CdpError as exc:
+        except TransportError as exc:
             logger.debug("could not read live cookies: %s", exc)
             live = {}
 
@@ -358,7 +358,7 @@ class MessageClient(BaseClient):
 
         return self._session.state.acting_as_page
 
-    def _start_from_profile(self, cdp: CdpTransport, uid: str) -> tuple[bool, str | None]:
+    def _start_from_profile(self, cdp: BrowserTransport, uid: str) -> tuple[bool, str | None]:
         """Open the profile and click its "Message" button.
 
         Also returns the profile's display name, so the resulting composer can be
@@ -368,7 +368,7 @@ class MessageClient(BaseClient):
         self._pace()
         try:
             cdp.navigate(f"{PROFILE_BASE}{uid}", timeout=45.0)
-        except CdpError as exc:
+        except TransportError as exc:
             logger.info("could not open profile page for %s: %s", uid, exc)
             return False, None
 
@@ -390,7 +390,7 @@ class MessageClient(BaseClient):
         return False, None
 
     @staticmethod
-    def _profile_name(cdp: CdpTransport) -> str | None:
+    def _profile_name(cdp: BrowserTransport) -> str | None:
         """The profile page's heading, used to verify the composer it opens."""
         raw = cdp.evaluate(
             "(() => { const h = document.querySelector('h1'); "
@@ -399,7 +399,7 @@ class MessageClient(BaseClient):
         return str(raw).strip() if raw else None
 
     @staticmethod
-    def _message_button_position(cdp: CdpTransport) -> dict[str, float] | None:
+    def _message_button_position(cdp: BrowserTransport) -> dict[str, float] | None:
         """Viewport coordinates of the profile's Message button, if present."""
         raw = cdp.evaluate(
             """
@@ -423,7 +423,7 @@ class MessageClient(BaseClient):
         return None
 
     @staticmethod
-    def _click_at(cdp: CdpTransport, position: dict[str, float]) -> bool:
+    def _click_at(cdp: BrowserTransport, position: dict[str, float]) -> bool:
         """Dispatch a real mouse click (JS `.click()` misses React handlers)."""
         for event_type in ("mousePressed", "mouseReleased"):
             cdp.send(
@@ -439,7 +439,7 @@ class MessageClient(BaseClient):
         return True
 
     @staticmethod
-    def _thread_id(cdp: CdpTransport) -> str | None:
+    def _thread_id(cdp: BrowserTransport) -> str | None:
         """Thread id from the current URL, or ``None`` when not in a thread.
 
         Returning the requested uid as a fallback (the old behaviour) made a
@@ -450,12 +450,12 @@ class MessageClient(BaseClient):
         return match.group(1) if match else None
 
     @staticmethod
-    def _composer_target(cdp: CdpTransport) -> str | None:
+    def _composer_target(cdp: BrowserTransport) -> str | None:
         """Name from the composer's ``Write to <name>`` label."""
         raw = cdp.evaluate(_script("\n  return composerTarget;\n"))
         return str(raw).strip() if raw else None
 
-    def _wait_for_composer(self, cdp: CdpTransport, timeout: float) -> bool:
+    def _wait_for_composer(self, cdp: BrowserTransport, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._has_composer(cdp):
@@ -464,7 +464,7 @@ class MessageClient(BaseClient):
         return False
 
     @staticmethod
-    def _click_thread_row(cdp: CdpTransport, uid: str) -> bool:
+    def _click_thread_row(cdp: BrowserTransport, uid: str) -> bool:
         clicked = cdp.evaluate(
             _script(
                 rf"""
@@ -481,17 +481,17 @@ class MessageClient(BaseClient):
         return bool(clicked)
 
     @staticmethod
-    def _has_composer(cdp: CdpTransport) -> bool:
+    def _has_composer(cdp: BrowserTransport) -> bool:
         try:
             return bool(cdp.evaluate(_script("\n  return !!composer;\n")))
-        except CdpError:
+        except TransportError:
             return False
 
     # --- composing ------------------------------------------------------
 
     def _compose_and_send(
         self,
-        cdp: CdpTransport,
+        cdp: BrowserTransport,
         text: str,
         *,
         expected_target: str | None = None,
@@ -558,7 +558,7 @@ class MessageClient(BaseClient):
             )
 
     @staticmethod
-    def _composer_text(cdp: CdpTransport) -> str | None:
+    def _composer_text(cdp: BrowserTransport) -> str | None:
         """Current composer text, or ``None`` when the composer is gone.
 
         The distinction matters for the delivery check: an empty string means
@@ -571,7 +571,7 @@ class MessageClient(BaseClient):
         return None if value is None else str(value)
 
     @staticmethod
-    def _click_send(cdp: CdpTransport) -> bool:
+    def _click_send(cdp: BrowserTransport) -> bool:
         clicked = cdp.evaluate(
             _script(
                 """
@@ -584,7 +584,7 @@ class MessageClient(BaseClient):
         return bool(clicked)
 
     @staticmethod
-    def _press_enter(cdp: CdpTransport) -> None:
+    def _press_enter(cdp: BrowserTransport) -> None:
         for event_type, key, text in (
             ("keyDown", "Enter", ""),
             ("char", "\r", "\r"),
@@ -602,7 +602,7 @@ class MessageClient(BaseClient):
                 },
             )
 
-    def _wait_until_cleared(self, cdp: CdpTransport, timeout: float = 15.0) -> bool:
+    def _wait_until_cleared(self, cdp: BrowserTransport, timeout: float = 15.0) -> bool:
         """True only when the composer still exists and is empty.
 
         A vanished composer is *not* success: a re-render or navigation also
