@@ -10,9 +10,13 @@ the Chrome DevTools Protocol instead:
 
 1. open the conversation — three fallbacks, cheapest first:
    ``/messages/t/<id>/`` → thread-list row → profile "*Message*" button
-2. focus the composer, insert the text
-3. click the *"Press enter to send"* button (Enter key as fallback)
-4. confirm success by watching the composer clear
+2. verify the composer addresses the intended recipient (thread id or name),
+   re-checking immediately before the click
+3. insert the text, refusing when the box already holds a draft
+4. click the *"Press enter to send"* button (Enter key as fallback)
+5. classify the outcome: cleared composer = ``submitted``; a new "Couldn't send"
+   label on our bubble = ``rejected``; anything unobservable after the click =
+   ``unknown``. A cleared composer alone is *not* proof of delivery.
 
 The third fallback is unavailable to a Page: Facebook does not render the
 profile "Message" button while the session acts as a Page, because a Page
@@ -101,19 +105,37 @@ _RESOLVE_COMPOSER = """
 _FAILED_BUBBLE_MARKERS = ("Couldn't send", "无法发送", "無法傳送", "No se pudo enviar")
 
 
-def _failed_bubbles(cdp: BrowserTransport) -> int:
-    """Number of bubbles in the open conversation that Messenger marked unsent."""
+def _failed_bubbles(cdp: BrowserTransport, needle: str | None = None) -> int:
+    """Status labels in the open conversation that say "not sent".
+
+    Only *leaf* nodes whose whole trimmed text is exactly a marker count. An
+    earlier version searched article bodies for the marker, so a perfectly normal
+    message such as "fixed the Couldn't send issue" incremented the counter and
+    was reported as rejected — a false alarm that invites a duplicate resend.
+
+    ``needle`` (a prefix of the text we just sent) restricts the count to the
+    bubble we produced, so a concurrent failure in another message cannot taint
+    this send.
+    """
     markers = ", ".join(json.dumps(marker) for marker in _FAILED_BUBBLE_MARKERS)
+    prefix = json.dumps(needle) if needle else "null"
     count: Any = cdp.evaluate(
         _script(
             f"""
   const markers = [{markers}];
+  const needle = {prefix};
   const main = document.querySelector('[role="main"]');
   if (!main) return 0;
   let failed = 0;
-  for (const article of main.querySelectorAll('[role="article"]')) {{
-    const text = article.innerText || '';
-    if (markers.some(marker => text.includes(marker))) failed += 1;
+  for (const node of main.querySelectorAll('*')) {{
+    if (node.childElementCount !== 0) continue;          // status text is a leaf
+    const text = (node.textContent || '').trim();
+    if (!markers.includes(text)) continue;               // exact, not "contains"
+    if (needle) {{
+      const article = node.closest('[role="article"]');
+      if (!article || !(article.innerText || '').includes(needle)) continue;
+    }}
+    failed += 1;
   }}
   return failed;
 """
@@ -125,18 +147,33 @@ def _failed_bubbles(cdp: BrowserTransport) -> int:
         return 0
 
 
+# Facebook shortens long names in the composer label ("Write to Alice Sm…").
+_TRUNCATION_SUFFIXES = ("\u2026", "...")
+
+
 def _same_name(actual: str, expected: str) -> bool:
     """Whether two Messenger display names plausibly denote the same account.
 
-    Facebook truncates long names in the composer label ("Write to Alice Sm…"),
-    so a prefix match counts; anything shorter than three characters is ignored
-    rather than accepted by accident.
+    A plain prefix is *not* enough: "Example User" is a prefix of "Example User
+    Two", and treating them as equal would send to the wrong person. Only an
+    explicit truncation marker makes the shorter name a candidate, and the longer
+    one must still start with the visible prefix.
     """
     a = " ".join(actual.split()).casefold()
     b = " ".join(expected.split()).casefold()
     if len(a) < 3 or len(b) < 3:
         return False
-    return a == b or a.startswith(b) or b.startswith(a)
+    if a == b:
+        return True
+
+    for short, long in ((a, b), (b, a)):
+        for suffix in _TRUNCATION_SUFFIXES:
+            if not short.endswith(suffix):
+                continue
+            stem = short[: -len(suffix)].rstrip()
+            if len(stem) >= 3 and long.startswith(stem):
+                return True
+    return False
 
 
 def _script(body: str) -> str:
@@ -527,6 +564,19 @@ class MessageClient(BaseClient):
 
     # --- composing ------------------------------------------------------
 
+    def _assert_composer_target(
+        self, cdp: BrowserTransport, expected_target: str | None, *, when: str
+    ) -> None:
+        """Fail unless the composer still addresses ``expected_target``."""
+        if not expected_target:
+            return
+        current_target = self._composer_target(cdp)
+        if current_target and not _same_name(current_target, expected_target):
+            raise FacebookError(
+                f"the composer switched to {current_target!r} {when} "
+                f"(expected {expected_target!r}); nothing was sent"
+            )
+
     def _compose_and_send(
         self,
         cdp: BrowserTransport,
@@ -555,12 +605,7 @@ class MessageClient(BaseClient):
         # The composer can be re-rendered between opening the thread and typing
         # (a notification opening a docked chat is enough). Re-read whose box it
         # is now; a different name means the conversation moved under us.
-        current_target = self._composer_target(cdp)
-        if expected_target and current_target and not _same_name(current_target, expected_target):
-            raise FacebookError(
-                f"the composer switched to {current_target!r} while composing "
-                f"(expected {expected_target!r}); nothing was sent"
-            )
+        self._assert_composer_target(cdp, expected_target, when="while composing")
 
         # insertText appends at the caret, so an unsent draft would be sent
         # together with our message ("old draft: hello"). Never touch it.
@@ -583,35 +628,57 @@ class MessageClient(BaseClient):
                 f"composer did not accept the text (got {typed!r}); aborting before send"
             )
 
-        # The click (or Enter) is what puts the message on the wire.
-        failed_before = _failed_bubbles(cdp)
+        # Only the text we produced counts, so another bubble's failure cannot be
+        # mistaken for ours.
+        needle = " ".join(text.split())[:20]
+        failed_before = _failed_bubbles(cdp, needle)
+
         self._pace()
-        if not self._click_send(cdp):
-            self._press_enter(cdp)
 
-        cleared = self._wait_until_cleared(cdp)
-        # A rejected message also clears the composer: Messenger moves the text
-        # into a bubble and *then* stamps it "Couldn't send", so the marker can
-        # appear seconds later. Only a *new* failure counts, so an older one
-        # cannot taint this send.
-        if cleared and self._wait_for_rejection(cdp, failed_before):
-            raise SendRejectedError(
-                'Messenger marked the message as unsent ("Couldn\'t send"); it did '
-                "not reach the recipient — retrying is safe but will probably fail "
-                "the same way"
-            )
+        # The conversation can move during the pacing wait (a docked chat opening
+        # is enough), and the click lands wherever the composer points *now*.
+        # Re-check immediately before sending, not only before typing.
+        self._assert_composer_target(cdp, expected_target, when="before sending")
 
-        if not cleared:
+        # From here on the message may be on the wire. Anything that goes wrong
+        # after this point is an *unobservable* outcome: reporting it as
+        # "not_sent" would invite a duplicate resend.
+        try:
+            if not self._click_send(cdp):
+                self._press_enter(cdp)
+
+            cleared = self._wait_until_cleared(cdp)
+            # A rejected message also clears the composer: Messenger moves the
+            # text into a bubble and *then* stamps it "Couldn't send", so the
+            # marker can appear seconds later. Only a *new* failure counts.
+            if cleared and self._wait_for_rejection(cdp, failed_before, needle):
+                raise SendRejectedError(
+                    'Messenger marked the message as unsent ("Couldn\'t send"); it '
+                    "did not reach the recipient — retrying is safe but will "
+                    "probably fail the same way"
+                )
+
+            if not cleared:
+                raise SendUncertainError(
+                    "message may have been sent: the composer still contains text "
+                    "after clicking send, so the outcome is unknown — check the "
+                    "conversation before resending"
+                )
+        except (SendRejectedError, SendUncertainError):
+            raise
+        except FacebookError as exc:
+            # e.g. a CDP read failing after the click: the send was issued, so the
+            # outcome cannot be observed. Never downgrade this to "not_sent".
             raise SendUncertainError(
-                "message may have been sent: the composer still contains text after "
-                "clicking send, so the outcome is unknown — check the conversation "
-                "before resending"
-            )
+                "the send was issued but its outcome could not be observed "
+                f"({exc}); check the conversation before resending"
+            ) from exc
 
     def _wait_for_rejection(
         self,
         cdp: BrowserTransport,
         failed_before: int,
+        needle: str | None = None,
         timeout: float = 4.0,
     ) -> bool:
         """Wait for a *new* unsent bubble; the marker lags the send by seconds.
@@ -622,7 +689,7 @@ class MessageClient(BaseClient):
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if _failed_bubbles(cdp) > failed_before:
+            if _failed_bubbles(cdp, needle) > failed_before:
                 return True
             time.sleep(0.4)
         return False

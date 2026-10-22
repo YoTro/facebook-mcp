@@ -60,6 +60,7 @@ class FakeCdp:
         existing_failures: int = 0,
         draft: str = "",
         vanish_after_send: bool = False,
+        switch_target_after_insert: str | None = None,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
     ) -> None:
         self.composer_on_thread = composer_on_thread
@@ -78,6 +79,7 @@ class FakeCdp:
         self.send_failed = False
         self.draft = draft
         self.vanish_after_send = vanish_after_send
+        self.switch_target_after_insert = switch_target_after_insert
         self.url = url
 
         self.composer_open = False
@@ -125,6 +127,9 @@ class FakeCdp:
             if self.accepts_text:
                 self.composer_text = params.get("text", "")
                 self.composer_open = True
+            if self.switch_target_after_insert:
+                # e.g. a docked chat stole the box during the pacing wait
+                self.composer_target = self.switch_target_after_insert
             return {}
         if method == "Input.dispatchKeyEvent":
             self.key_events.append(str(params.get("type")))
@@ -641,3 +646,114 @@ def test_an_older_failed_bubble_does_not_poison_a_later_send() -> None:
 
     assert result.ok is True
     assert result.delivery == "submitted"
+
+
+# --- failure classification and recipient verification -------------------
+
+
+class _RaisingCdp(FakeCdp):
+    """Fails on a chosen JS evaluation, optionally only after the send click."""
+
+    def __init__(self, *, raise_on: str, after_send_only: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.raise_on = raise_on
+        self.after_send_only = after_send_only
+
+    def evaluate(self, expression: str, **kwargs):
+        if self.raise_on in expression and (self.sent or not self.after_send_only):
+            from facebook_mcp.transport.cdp import CdpError
+
+            raise CdpError("DevTools connection reset")
+        return super().evaluate(expression, **kwargs)
+
+
+def test_error_after_the_click_is_unknown_not_not_sent() -> None:
+    """A lost reply after dispatch must not look safe to retry."""
+    from facebook_mcp.services.message_service import MessageService
+
+    # The composer read after the click explodes.
+    cdp = _RaisingCdp(raise_on="composer.innerText", after_send_only=True, composer_on_thread=True)
+    service = MessageService(_client(cdp))
+
+    result = service.send_message("200000000000001", "hello")
+
+    assert result.ok is False
+    assert result.delivery == "unknown"
+    assert "could not be observed" in (result.error or "")
+
+
+def test_error_before_the_click_stays_not_sent() -> None:
+    """A failure while typing never reached the wire."""
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = _RaisingCdp(raise_on="composer.focus()", composer_on_thread=True)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hello")
+
+    assert result.delivery == "not_sent"
+
+
+def test_failure_detection_ignores_message_body_text() -> None:
+    """Sending text that mentions the marker must not read as a rejection."""
+    seen: list[str] = []
+
+    class _CapturingCdp(FakeCdp):
+        def evaluate(self, expression: str, **kwargs):
+            if "const markers =" in expression:
+                seen.append(expression)
+            return super().evaluate(expression, **kwargs)
+
+    cdp = _CapturingCdp(composer_on_thread=True)
+    result = _client(cdp).send("200000000000001", "fixed the Couldn't send issue")
+
+    assert result.ok is True
+    assert result.delivery == "submitted"
+    # The generated probe compares whole leaf labels and scopes them to our text;
+    # a substring search over article bodies is what caused the false alarm.
+    assert seen, "rejection probe was not executed"
+    assert "childElementCount" in seen[0]
+    assert "includes(text)" in seen[0] or "markers.includes" in seen[0]
+    assert "fixed the Couldn" in seen[0]
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [
+        ("Example User", "Example User Two"),
+        ("Example User Two", "Example User"),
+        ("Alice Sm", "Alice Smith"),  # no truncation marker: not the same
+        ("Alice", "Alice Smith"),  # too short to judge
+    ],
+)
+def test_names_that_are_only_prefixes_do_not_match(actual: str, expected: str) -> None:
+    from facebook_mcp.clients.message_client import _same_name
+
+    assert _same_name(actual, expected) is False
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected"),
+    [
+        ("Example User", "Example User"),
+        ("Alice Sm\u2026", "Alice Smith"),
+        ("Alice Sm...", "Alice Smith"),
+        ("alice  smith", "Alice Smith"),
+    ],
+)
+def test_truncated_or_equal_names_match(actual: str, expected: str) -> None:
+    from facebook_mcp.clients.message_client import _same_name
+
+    assert _same_name(actual, expected) is True
+
+
+def test_conversation_switch_after_typing_is_caught_before_click() -> None:
+    """Typing and clicking are separated by the pacing wait; re-check in between."""
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        composer_target="Example User",
+        switch_target_after_insert="Example User Two",
+    )
+
+    with pytest.raises(FacebookError, match="switched to"):
+        _client(cdp).send("200000000000001", "hello")
+
+    assert cdp.sent is False, "the message was sent to the wrong conversation"
