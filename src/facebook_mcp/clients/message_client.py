@@ -1,12 +1,10 @@
 """Messaging client (L3).
 
-**Implementation note.** Modern Messenger web does not send messages through a
-plain HTTP GraphQL mutation: the send is issued from Facebook's service worker
-(observed via ``Network.requestWillBeSent`` on the page target, but not
-interceptable there), and typing/sync traffic runs over a binary "Lightspeed"
-WebSocket (``wss`` frames carry no readable message body). Re-implementing that
-transport is out of scope, so this client drives the real Messenger UI through
-the Chrome DevTools Protocol instead:
+**Implementation note.** Sending is protocol-first now: ``LightspeedSender``
+posts JSON tasks on ``wss://gateway.facebook.com/ws/lightspeed`` and reads the
+gateway's verdict (see ``transport/lightspeed.py`` for the frame layout). This
+module keeps the *UI* path, which is used when that channel is unavailable and
+is the only way to start a conversation Facebook will not open over the socket:
 
 1. open the conversation — three fallbacks, cheapest first:
    ``/messages/t/<id>/`` → thread-list row → profile "*Message*" button
@@ -206,6 +204,7 @@ class MessageClient(BaseClient):
         session: SessionManager,
         settings: Settings | None = None,
         profile_client: ProfileClient | None = None,
+        lightspeed_sender: LightspeedSender | None = None,
     ) -> None:
         super().__init__(transport, session, settings)
         self._profiles = profile_client
@@ -231,7 +230,7 @@ class MessageClient(BaseClient):
         thread_id, composer_target = self._open_thread(cdp, uid)
         try:
             self._compose_and_send(cdp, text, expected_target=composer_target)
-        except SendRejectedError as exc:
+        except (SendRejectedError, SendUncertainError) as exc:
             # The caller needs to know which thread was affected.
             exc.thread_id = thread_id
             raise
@@ -736,10 +735,16 @@ class MessageClient(BaseClient):
             # text into a bubble and *then* stamps it "Couldn't send", so the
             # marker can appear seconds later. Only a *new* failure counts.
             if cleared and self._wait_for_rejection(cdp, failed_before, needle):
-                raise SendRejectedError(
-                    'Messenger marked the message as unsent ("Couldn\'t send"); it '
-                    "did not reach the recipient — retrying is safe but will "
-                    "probably fail the same way"
+                # The DOM cannot tell a status label from a message whose own text
+                # is exactly "Couldn't send", and a false "rejected" tells the
+                # caller a retry is safe — i.e. invites a duplicate. Only the
+                # gateway's explicit verdict may claim rejection (see
+                # clients/lightspeed_client.py); the UI path reports the doubt.
+                raise SendUncertainError(
+                    'a "Couldn\'t send" label appeared, but the UI cannot prove it '
+                    "belongs to this message (the text itself may match); it may or "
+                    "may not have been delivered — check the conversation before "
+                    "resending"
                 )
 
             if not cleared:

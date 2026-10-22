@@ -35,6 +35,9 @@ class SessionManager:
             or settings.cookie_file
             or settings.account_paths().cookies_file.is_file()
         )
+        # Where the cookies in use actually came from; invalidate() must only
+        # discard a jar this process bootstrapped, never one the user handed us.
+        self._source: str = "none"
         self._state = self._load(settings)
         # Set when Facebook rejected the credentials; see invalidate().
         self._rejected: str | None = None
@@ -85,20 +88,17 @@ class SessionManager:
         self._rejected = reason or "rejected by Facebook"
         self._state.fb_dtsg = None
         self._state.lsd = None
-        if not self.from_config:
-            self._state.cookies.clear()
-        if self._persisted_by_bootstrap():
-            # The store only holds what the browser handed us; deleting it lets
-            # the next start (or the next require_auth) bootstrap again instead
-            # of loading a cookie Facebook already refused. Checked separately:
-            # a session can be bootstrapped (from_config stays False) *and* have
-            # written that jar to disk.
-            self._discard_persisted()
-            self._state.cookies.clear()
-        logger.info("session invalidated (%s)", self._rejected)
 
-    def _persisted_by_bootstrap(self) -> bool:
-        return self._settings.account_paths().load_meta().get("source") == "cdp-bootstrap"
+        if self._source == "bootstrap":
+            # Everything in the jar arrived from the browser, and we wrote it to
+            # the store ourselves: drop both so the next call bootstraps again.
+            self._state.cookies.clear()
+            self._discard_persisted()
+        elif not self.from_config:
+            self._state.cookies.clear()
+        # A jar the user supplied (FB_COOKIE / FB_COOKIE_FILE) is left untouched:
+        # clearing it in memory is enough, and its file is not ours to delete.
+        logger.info("session invalidated (%s)", self._rejected)
 
     def _discard_persisted(self) -> None:
         paths = self._settings.account_paths()
@@ -137,6 +137,7 @@ class SessionManager:
         Priority:``FB_COOKIE_FILE`` → ``<home>/accounts/<account>/cookies.txt`` → ``FB_COOKIE``.
         """
         if settings.cookie_file:
+            self._source = "cookie-file"
             state = extractor.from_cookie_file(settings.cookie_file, user_agent=settings.user_agent)
             logger.info(
                 "account %r: loaded %d cookies from FB_COOKIE_FILE (authenticated=%s)",
@@ -148,6 +149,7 @@ class SessionManager:
 
         account_paths = settings.account_paths()
         if account_paths.cookies_file.is_file():
+            self._source = "account-store"
             warning = account_paths.permission_warning()
             if warning:
                 logger.warning(warning)
@@ -164,6 +166,7 @@ class SessionManager:
             return state
 
         if settings.cookie:
+            self._source = "cookie"
             state = extractor.from_cookie_string(settings.cookie, user_agent=settings.user_agent)
             logger.warning(
                 "account %r: using FB_COOKIE from the environment; prefer %s for isolation",
@@ -200,9 +203,15 @@ class SessionManager:
             )
             return False
         self._rejected = None
+        self._source = "bootstrap"
         logger.info("bootstrapped %d cookies from browser", len(cookies))
         self._persist_bootstrapped(cookies)
         return True
+
+    @property
+    def source(self) -> str:
+        """Where the active cookies came from: bootstrap / account-store / cookie*."""
+        return self._source
 
     def _persist_bootstrapped(self, cookies: dict[str, str]) -> None:
         """Store browser cookies in the account store for browser-free runs.

@@ -635,17 +635,22 @@ def test_failure_before_the_click_is_reported_as_not_sent() -> None:
     assert cdp.sent is False
 
 
-def test_rejected_send_is_reported_as_rejected() -> None:
-    """Messenger clears the composer and then marks the bubble "Couldn't send"."""
+def test_ui_failure_marker_is_reported_as_unknown() -> None:
+    """Messenger clears the composer and then marks the bubble "Couldn't send".
+
+    The UI path cannot prove the label belongs to *our* message (a message whose
+    own text is exactly that label looks identical), and calling it "rejected"
+    would tell the caller a retry is safe. Only the gateway may say rejected.
+    """
     from facebook_mcp.services.message_service import MessageService
 
     cdp = FakeCdp(composer_on_thread=True, send_fails=True)
     result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
 
     assert result.ok is False
-    assert result.delivery == "rejected"
+    assert result.delivery == "unknown"
+    assert "cannot prove" in (result.error or "")
     assert result.thread_id == "200000000000001"
-    assert "unsent" in (result.error or "")
     assert cdp.send_failed is True
 
 
@@ -795,8 +800,10 @@ def test_multiline_text_is_matched_against_a_normalised_bubble() -> None:
     assert "Hello Example User" in script
     # ...and the bubble text is collapsed the same way before comparing.
     assert "\\\\s+/g" in script or "\\s+/g" in script
-    # A failure was produced, so the send must not be reported as submitted.
-    assert result.delivery == "rejected"
+    # A failure marker was produced, but the UI cannot attribute it with
+    # certainty, so the result must be "unknown" — never "rejected", which would
+    # tell the caller a retry is safe.
+    assert result.delivery == "unknown"
 
 
 def test_unreadable_composer_target_blocks_the_send() -> None:

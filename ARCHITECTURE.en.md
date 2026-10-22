@@ -224,7 +224,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 332 tests (all offline)
+└── tests/                           # 344 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -488,7 +488,9 @@ layer (`base.py` only defines dataclasses).
     submitted, safe to retry), `submitted` (handed to Messenger, but the web UI
     exposes no server acknowledgement, so a retry may duplicate), `rejected`
     (Messenger marked it unsent — `SendRejectedError`, safe to retry) and
-    `unknown` (send clicked, outcome unobservable — `SendUncertainError`).
+    `unknown` (send clicked but the outcome is unobservable: composer vanished, a
+    reply was lost, the stream dropped, or the UI spotted a possible failure
+    marker — `SendUncertainError`).
     **Only `submitted` is `ok=True`**; the other three are `ok=False`, and what
     differs is whether a retry is safe. `MessageService` maps
     `SendUncertainError` → `unknown`, `SendRejectedError` → `rejected`, and every
@@ -710,29 +712,27 @@ server.search_pages("pest control")
 The `transport_hint` rule decides whether this hop uses curl_cffi or the browser
 (§9.3).
 
-### 6.3 Send a message (login + browser required)
+### 6.3 Send a message (protocol first, UI fallback)
 
 ```
 server.send_message(recipient="exampleuser", text="...")
   → MessageService.send_message(...)
     → MessageClient.send(recipient, text)
-      → resolve_recipient(): username → uid (needs ProfileClient)
-      → cdp_from(transport)                                # must be a browser transport
-      → navigate  https://www.facebook.com/messages/t/<uid>/
-      → wait for the composer; otherwise click the row with the exact thread id
-      → otherwise abort when the session acts as a Page (it cannot start a chat, §5.5)
-      → otherwise open the profile and click "Message"
-      → verify it: thread id == uid, or "Write to <name>" == recipient name
-        (a mismatch refuses to send: nothing was sent)
-      → Input.insertText → verify the composer received it
-      → click "Press enter to send" (fallback: Enter key)
-      → poll until the composer is empty
-      → a *new* "Couldn't send" bubble → SendRejectedError(rejected)
-  → SendResult(ok=True, delivery="submitted", thread_id=...)
+      → resolve_recipient(): username → uid / thread key
+      → protocol path (FB_MESSAGE_TRANSPORT=lightspeed|auto)
+          → LightspeedSender.send(): require_auth → shared limiter → connect
+          → task 46 → read the verdict
+              replaceOptimsiticMessage + mid → submitted + message_id
+              markOptimisticMessageFailed   → rejected (never auto-resent)
+              no reply / dropped stream     → unknown (no automatic resend)
+      → fallback path (FB_MESSAGE_TRANSPORT=ui, or channel unusable)
+          → CDP: open thread → verify recipient → type → click → classify (no `rejected`)
+  → SendResult(ok, delivery, thread_id, message_id, error)
 ```
 
-> There is no GraphQL here: the send is issued by Facebook's service worker.
-> Details in §8.3 and §10 "M5".
+> The UI path stays because only it can **start** a conversation (the socket only
+> posts to a known thread key), and because it is what distinguishes "this thread
+> needs the UI" from "this recipient has messaging turned off".
 
 ---
 
@@ -1017,7 +1017,7 @@ layout change requires a client change (§11 already lists it as brittle). See
 | public read (`requires_auth=False`) | curl_cffi |
 | login required **and** the session already holds cookies (store, config, or just bootstrapped) | **curl_cffi (pure protocol)** |
 | login required **and** no cookies at all | CDP **once** to bootstrap them; that same request then uses curl_cffi |
-| sending a message | forced CDP (`cdp_from()`); raises `UnsupportedError` on HTTP-only transports |
+| sending a message | protocol first (Lightspeed WS); the CDP UI is only a fallback (`FB_MESSAGE_TRANSPORT`) |
 
 ### 9.4 Session lifecycle is its own layer
 
@@ -1050,7 +1050,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (332), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (344), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1098,7 +1098,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 332 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 344 across 17 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

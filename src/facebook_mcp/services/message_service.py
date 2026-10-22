@@ -27,7 +27,12 @@ class MessageService:
             result = self._messages.send(recipient, text)
         except SendUncertainError as exc:
             logger.warning("send_message outcome unknown: %s", exc)
-            return SendResult(ok=False, delivery="unknown", error=str(exc))
+            return SendResult(
+                ok=False,
+                delivery="unknown",
+                thread_id=getattr(exc, "thread_id", None),
+                error=str(exc),
+            )
         except SendRejectedError as exc:
             logger.warning("send_message rejected by Messenger: %s", exc)
             return SendResult(

@@ -448,3 +448,45 @@ def test_invalidate_keeps_a_user_managed_jar(tmp_path: Path) -> None:
 
     manager.invalidate("HTTP 403")
     assert paths.cookies_file.exists(), "the user's own jar must not be deleted"
+
+
+def test_invalidate_does_not_touch_a_jar_the_user_switched_to(tmp_path: Path) -> None:
+    """A store written by bootstrap must not invalidate an explicit jar later.
+
+    Reproduced drift: bootstrap wrote the store, the operator then switched to
+    FB_COOKIE_FILE, and invalidate() still discarded the store and cleared the
+    explicit session — the next call would have bootstrapped the browser
+    identity instead.
+    """
+    settings = _settings(tmp_path)
+    SessionManager(settings, lambda: {"c_user": "111", "xs": "boot"}).require_auth()
+
+    store = AccountPaths.for_account("default", tmp_path)
+    assert store.cookies_file.is_file()
+
+    explicit = tmp_path / "explicit.txt"
+    explicit.write_text(NETSCAPE.replace("c_user\t123", "c_user\t222"), encoding="utf-8")
+    manager = SessionManager(_settings(tmp_path, cookie_file=str(explicit)))
+    assert manager.source == "cookie-file"
+    assert manager.state.user_id == "222"
+
+    manager.invalidate("HTTP 403")
+
+    assert store.cookies_file.is_file(), "another session's store jar was deleted"
+    assert explicit.is_file(), "the user's explicit jar was deleted"
+
+
+def test_source_reports_where_the_cookies_came_from(tmp_path: Path) -> None:
+    store = AccountPaths.for_account("default", tmp_path).ensure()
+    store.cookies_file.write_text(NETSCAPE, encoding="utf-8")
+    assert SessionManager(_settings(tmp_path)).source == "account-store"
+
+    boot = SessionManager(_settings(tmp_path / "other"), lambda: {"c_user": "9", "xs": "t"})
+    boot.require_auth()
+    assert boot.source == "bootstrap"
+
+    inline = SessionManager(_settings(tmp_path / "third", cookie="c_user=1; xs=2"))
+    assert inline.source == "cookie"
+
+    anonymous = SessionManager(_settings(tmp_path / "fourth"))
+    assert anonymous.source == "none"

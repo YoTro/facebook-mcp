@@ -1,7 +1,9 @@
 """Lightspeed frame codec, verified against a captured live frame.
 
-The fixture is a real Messenger send captured from the page WebSocket (the
-message text was replaced with an equal-length filler, nothing else changed).
+The fixture is a real Messenger send captured from the page WebSocket. Every
+captured identifier (thread, otid, epoch, trace) was replaced with an
+equal-length placeholder, and the message text with a filler, so nothing
+account-specific is committed while the byte layout stays exactly as observed.
 If the codec and the fixture disagree, the wire format changed.
 """
 

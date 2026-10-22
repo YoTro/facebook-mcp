@@ -161,7 +161,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    doc_id    : {entry['doc_id']}")
         print(f"    variables : {json.dumps(entry['variables'])[:140]}\n")
 
-    _capture(transport, deadline, args.url_contains, on_entry)
+    frames_dir = Path(args.frames_dir)
+    on_websocket = (
+        (lambda message: _record_websocket(message, frames, frames_dir)) if args.websocket else None
+    )
+    _capture(transport, deadline, args.url_contains, on_entry, on_websocket)
 
     if args.websocket:
         print(f"\ncaptured {len(frames)} websocket event(s)")
@@ -298,6 +302,7 @@ def _capture(
     deadline: float,
     url_contains: str,
     on_entry,
+    on_websocket=None,
 ) -> None:
     """Drain captured events until ``deadline``, reporting each new route.
 
@@ -305,8 +310,16 @@ def _capture(
     waiting for its reply, then reads the socket. Reading the raw WebSocket
     instead would lose everything that arrived during ``Page.navigate()``.
     """
+    websocket_events = (
+        "Network.webSocketCreated",
+        "Network.webSocketFrameSent",
+        "Network.webSocketFrameReceived",
+    )
     while time.monotonic() < deadline:
         for message in transport.drain_events(timeout=0.8, deadline=deadline):  # type: ignore[attr-defined]
+            if on_websocket is not None and message.get("method") in websocket_events:
+                on_websocket(message)
+                continue
             entry = _entry_from_event(message, url_contains)
             if entry is not None:
                 on_entry(entry)

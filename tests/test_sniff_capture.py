@@ -96,3 +96,35 @@ def test_entry_extracts_variables() -> None:
     )
     assert entry is not None
     assert entry["variables"] == {"text": "a"}
+
+
+def test_websocket_events_reach_the_recorder(tmp_path) -> None:
+    """--websocket must actually be wired into the capture loop."""
+    created = {
+        "method": "Network.webSocketCreated",
+        "params": {"url": "wss://gateway.facebook.com/ws/lightspeed?x=1"},
+    }
+    frame = {
+        "method": "Network.webSocketFrameSent",
+        "params": {"response": {"opcode": 2, "payloadData": "AAECAwQFBgcICQ=="}},
+    }
+    transport = _FakeTransport([[created, frame]])
+
+    seen: list[dict] = []
+    recorded: list[dict] = []
+
+    def on_ws(message: dict) -> None:
+        recorded.append(message)
+        sniff._record_websocket(message, seen, tmp_path)
+
+    sniff._capture(transport, time.monotonic() + 0.2, "graphql", lambda e: None, on_ws)
+
+    assert [m["method"] for m in recorded] == [
+        "Network.webSocketCreated",
+        "Network.webSocketFrameSent",
+    ]
+    assert seen[0]["event"] == "open"
+    assert "lightspeed" in str(seen[0]["url"])
+    written = list((tmp_path).glob("*.bin"))
+    assert written, "the binary frame was not saved"
+    assert written[0].read_bytes() == bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])

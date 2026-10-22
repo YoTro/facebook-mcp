@@ -54,6 +54,31 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Changed
 
+- **A suspected UI failure is now `unknown`, not `rejected`.** The DOM cannot
+  distinguish a status label from a message whose own body is exactly
+  "Couldn't send", and "rejected" promises a retry is safe. Only the gateway's
+  explicit verdict may claim rejection; the UI path reports the doubt and asks the
+  caller to look at the conversation.
+- **The Lightspeed channel now follows the same rules as the transports**: it goes
+  through `require_auth()` (so an empty store still bootstraps, and a rejected
+  session is refused), takes a slot in the shared rate limiter, honours
+  `FB_PROXY` (SOCKS needs PySocks) and uses the configured user agent.
+- **The protocol sender is built by the composition root**, not by
+  `MessageClient`, so the dependency-injection rule holds.
+- **`SessionManager` records the provenance of the loaded jar.** `invalidate()`
+  only discards a jar this process bootstrapped; switching to `FB_COOKIE_FILE`
+  later no longer lets an invalidation delete it and silently fall back to the
+  browser identity.
+- **Post-write failures are `unknown`, never `not_sent`.** A dropped reply, a
+  timeout or a failed `send_binary` after the frame was written no longer falls
+  back to the UI (which could duplicate the message) or reports `not_sent` (which
+  invites a retry).
+- **Rejections are attributed to our `otid`.** A frame may report several
+  messages; finding the marker anywhere used to blame our send for someone else's
+  failure.
+- **`tools/sniff.py --websocket` actually records.** The recorder was never wired
+  into the capture loop, so WebSocket events were dropped and no frames were
+  written.
 - **Search no longer needs a browser after the first bootstrap.** The CDP hint
   was keyed on where the cookies came from (`from_config`), so a session
   bootstrapped from Chrome sent every authenticated search back through CDP. The
@@ -308,8 +333,6 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Planned
 
-- Capture the Messenger send mutation (service-worker / Lightspeed) and replace
-  the browser-driven `send_message` with a protocol implementation.
 - Pagination for `search_*` (the `end_cursor` is already parsed by
   `SearchClient.next_cursor`).
 - Publish to PyPI.

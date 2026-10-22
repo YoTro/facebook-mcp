@@ -76,11 +76,15 @@ class ParseError(TransportError):
 class SendUncertainError(FacebookError):
     """The send was issued but its outcome cannot be verified.
 
-    Raised only after the UI was asked to send. Callers must **not** retry
-    blindly: the message may already be in the conversation.
+    Raised only after the UI or the gateway was asked to send. Callers must
+    **not** retry blindly: the message may already be in the conversation.
     """
 
     code = "send_uncertain"
+
+    def __init__(self, message: str = "", *, thread_id: str | None = None) -> None:
+        super().__init__(message)
+        self.thread_id = thread_id
 
 
 class SendRejectedError(FacebookError):

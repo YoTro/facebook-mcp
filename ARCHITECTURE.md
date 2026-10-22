@@ -206,7 +206,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 332 项测试(全部离线)
+└── tests/                           # 344 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -427,8 +427,10 @@ class Transport(Protocol):
     → 点 `Press enter to send`(回退 Enter)→ 轮询输入框清空
   - **`SendResult.delivery` 区分四种状态**:`not_sent`(什么都没提交,可安全重试)、
     `submitted`(已交给 Messenger,但 Web UI 拿不到服务端回执,重试可能重复)、
-    `rejected`(Messenger 把消息标成未发出,`SendRejectedError`,可安全重试)、
-    `unknown`(点了发送但结果不可观测:输入框消失或仍残留文本,`SendUncertainError`)。
+    `rejected`(**仅**当 Lightspeed 网关明确回 `markOptimisticMessageFailed`,
+    `SendRejectedError`,可安全重试;UI 路径无法证明归属,只会报 `unknown`)、
+    `unknown`(点了发送但结果不可观测:输入框消失、回执丢失、连接中断,
+    或 UI 检测到可能的失败标记,`SendUncertainError`)。
     **只有 `submitted` 是 `ok=True`**;其余三种都是 `ok=False`,区别在于能否安全重试。
     点击之后发生的任何非 `SendRejectedError`/`SendUncertainError` 异常(例如 CDP 读取失败)
     都会被归为 `unknown` —— 绝不能降级成 `not_sent`,否则会诱导重复发送。
@@ -629,28 +631,26 @@ server.search_pages("pest control")
 
 `transport_hint` 规则决定这一跳走 curl_cffi 还是浏览器(见 §9.3)。
 
-### 6.3 发送消息(需登录 + 浏览器)
+### 6.3 发送消息(协议优先,UI 回退)
 
 ```
 server.send_message(recipient="exampleuser", text="...")
   → MessageService.send_message(...)
     → MessageClient.send(recipient, text)
-      → resolve_recipient(): username → uid(需要 ProfileClient)
-      → cdp_from(transport)                                # 必须是浏览器通道
-      → navigate  https://www.facebook.com/messages/t/<uid>/
-      → 等 composer;失败则精确匹配线程 id 点击会话列表行
-      → 仍失败:Page 身份直接报错(Page 无法主动发起会话,§5.5)
-      → 否则打开主页点 "Message"
-      → 校验会话:线程 id == uid,或 "Write to <name>" == 收件人显示名
-        (不匹配则拒发,nothing was sent)
-      → Input.insertText → 校验输入框已接收
-      → 点 "Press enter to send"(回退:Enter 键)
-      → 轮询输入框是否清空
-      → 若新出现 "Couldn't send" 气泡 → SendRejectedError(rejected)
-  → SendResult(ok=True, delivery="submitted", thread_id=...)
+      → resolve_recipient(): username → uid / thread key
+      → 协议路径(FB_MESSAGE_TRANSPORT=lightspeed|auto)
+          → LightspeedSender.send():require_auth → 共享限速器 → 连接 gateway
+          → task 46 → 读回执
+              replaceOptimsiticMessage + mid → submitted + message_id
+              markOptimisticMessageFailed   → rejected(不自动重发)
+              无回执/连接中断               → unknown(禁止自动重发)
+      → 回退路径(FB_MESSAGE_TRANSPORT=ui,或通道不可用)
+          → CDP:打开会话 → 校验收件人 → 输入 → 点击 → 判定(不会报 rejected)
+  → SendResult(ok, delivery, thread_id, message_id, error)
 ```
 
-> 这里没有 GraphQL:发送由 Facebook 的 service worker 发起,详情见 §10「M5」与 §8.3。
+> 之所以保留 UI 路径:它能**新建**会话(协议通道只能往已有 thread key 发),
+> 也是唯一能区分"该线程需要 UI"与"对方关闭了私信"的手段。
 
 ---
 
@@ -913,7 +913,7 @@ client 是**逻辑**。**接口参数与模板**的变化只改 `routes/`,业务
 | 公开读(`requires_auth=False`) | curl_cffi |
 | 需登录 **且** 会话里已有 cookie(账户库、配置,或刚引导来的) | **curl_cffi(纯协议)** |
 | 需登录 **且** 一点 cookie 都没有 | CDP 引导**一次**,随后该请求也走 curl_cffi |
-| 发送消息 | 强制 CDP(`cdp_from()`),HTTP-only 时抛 `UnsupportedError` |
+| 发送消息 | 协议优先(Lightspeed WS);通道不可用才回退 CDP UI(`FB_MESSAGE_TRANSPORT`) |
 
 ### 9.4 会话生命周期独立成层
 
@@ -943,7 +943,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(332 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(344 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -988,7 +988,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:332 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:344 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

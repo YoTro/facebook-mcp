@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import lru_cache
 
+from ..clients.lightspeed_client import LightspeedSender
 from ..clients.message_client import MessageClient
 from ..clients.profile_client import ProfileClient
 from ..clients.search_client import SearchClient
@@ -107,8 +108,13 @@ class Services:
 
         self.profile_client = ProfileClient(self.transport, self.session, self.settings)
         self.search_client = SearchClient(self.transport, self.session, self.settings)
+        self.lightspeed_client = LightspeedSender(self.settings, self.session)
         self.message_client = MessageClient(
-            self.transport, self.session, self.settings, self.profile_client
+            self.transport,
+            self.session,
+            self.settings,
+            self.profile_client,
+            self.lightspeed_client,
         )
 
         self.post = PostService(self.profile_client)

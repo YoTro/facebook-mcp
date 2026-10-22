@@ -43,9 +43,9 @@ FB_MESSAGE_TRANSPORT=auto         # protocol first, UI fallback (default)
 FB_MESSAGE_TRANSPORT=ui           # legacy CDP-driven DOM path
 ```
 
-The UI path remains as a fallback (and captures the browser-side behaviour), but
-sending no longer needs a browser. See `ARCHITECTURE.en.md` §8.3 for the frame
-layout and the warm-up that the server requires.
+The UI path remains as a fallback (and is the only way to start a conversation),
+but sending no longer needs a browser. See `ARCHITECTURE.en.md` §8.3 for the frame
+layout and what the gateway's verdict does and does not prove.
 
 ## Install
 
@@ -211,7 +211,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (332 tests, fully offline) |
+| `make test` | `pytest -q` (344 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |
