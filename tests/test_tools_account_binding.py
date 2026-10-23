@@ -155,3 +155,24 @@ def test_export_cookies_honours_home_for_browser_selection(
     assert export_cookies.main(["--account", "work", "--home", str(other)]) == 0
     assert seen == ["http://127.0.0.1:9444"], "the global home chose the browser"
     assert (work / "cookies.txt").is_file()
+
+
+def test_import_marks_the_jar_as_user_supplied(tmp_path: Path) -> None:
+    """A manual import must not keep looking like a deletable bootstrap cache."""
+    from facebook_mcp.core.accounts import AccountPaths
+    from tools.import_cookies import record_import
+
+    paths = AccountPaths.for_account("work", tmp_path).ensure()
+    paths.merge_meta(source="cdp-bootstrap")  # left behind by a bootstrap
+    record_import(
+        paths,
+        [
+            {"name": "c_user", "value": "42"},
+            {"name": "xs", "value": "tok"},
+        ],
+    )
+
+    meta = paths.load_meta()
+    assert meta["source"] == "import"
+    assert meta["c_user"] == "42"
+    assert meta["authenticated"] is True

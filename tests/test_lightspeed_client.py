@@ -325,15 +325,26 @@ def test_user_agent_override_reaches_the_connector(monkeypatch: pytest.MonkeyPat
 
 
 # ---------- 6: the connector must accept what we hand it ----------
-def test_proxy_options_satisfy_the_connector_for_https() -> None:
-    """websocket-client has no TLS-to-proxy mode; https must map to http."""
+def test_https_proxy_is_refused_not_downgraded() -> None:
+    """websocket-client has no TLS-to-proxy mode.
+
+    Mapping https:// to the plain-HTTP tunnel would ship a plaintext CONNECT to a
+    TLS port: it cannot work, and the scheme rewrite hides why. Refuse it.
+    """
+    sender, _ = _sender(ACCEPT)
+    sender._settings = Settings(proxy="https://127.0.0.1:8443")
+    with pytest.raises(LightspeedError, match="https:// proxies are not supported"):
+        sender._proxy_options()
+
+
+def test_http_proxy_satisfies_the_connector() -> None:
+    """The supported case still has to pass the client's own validator."""
     from websocket._http import proxy_info
 
     sender, _ = _sender(ACCEPT)
-    sender._settings = Settings(proxy="https://127.0.0.1:8443")
+    sender._settings = Settings(proxy="http://127.0.0.1:8080")
     options = sender._proxy_options()
     assert options["proxy_type"] == "http"
-    # The client's own validator, not our idea of it:
     assert proxy_info(**options).proxy_protocol == "http"
 
 

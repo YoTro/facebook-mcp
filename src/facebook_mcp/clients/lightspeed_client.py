@@ -200,14 +200,16 @@ class LightspeedSender:
         scheme = (parsed.scheme or "http").lower()
 
         if scheme == "https":
-            # websocket-client tunnels through a *plain* HTTP CONNECT; it has no
-            # TLS-to-proxy support. Map it so `https://` entries work, and say so.
-            logger.info(
-                "proxy %s uses https; the WebSocket client tunnels over plain HTTP",
-                parsed.hostname,
+            # websocket-client only tunnels through a *plain* HTTP CONNECT; it has
+            # no TLS-to-proxy mode. Rewriting the scheme would send a plaintext
+            # CONNECT to a TLS port: it cannot work, and it hides the mismatch
+            # behind a connection error.
+            raise LightspeedError(
+                "https:// proxies are not supported by the WebSocket client (it "
+                "tunnels with a plain HTTP CONNECT). Point FB_PROXY at an http:// or "
+                "socks5:// proxy, or send with message_transport=ui for this account"
             )
-            scheme = "http"
-        elif not scheme.startswith("socks") and scheme != "http":
+        if not scheme.startswith("socks") and scheme != "http":
             raise LightspeedError(f"unsupported proxy scheme {scheme!r} for the WebSocket client")
 
         if scheme.startswith("socks"):

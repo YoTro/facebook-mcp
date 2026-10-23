@@ -464,3 +464,26 @@ def test_a_persisted_jar_stays_refreshable_after_a_restart(tmp_path: Path) -> No
     # … and it re-bootstraps instead of replaying the dead cookie.
     assert reopened.require_auth().user_id == "8"
     assert reopened.source == "bootstrap"
+
+
+def test_invalidation_discards_only_a_bootstrapped_jar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A jar the user imported must survive a rejection; ours may be re-created."""
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+
+    imported = AccountPaths.for_account("imported", tmp_path).ensure()
+    imported.cookies_file.write_text(NETSCAPE, encoding="utf-8")
+    imported.merge_meta(source="import")
+    session = SessionManager(Settings(account="imported"))
+    assert session.source == "account-store"
+    session.invalidate("HTTP 403 on /x")
+    assert imported.cookies_file.is_file(), "a user-supplied jar was deleted"
+
+    bootstrapped = AccountPaths.for_account("bootstrapped", tmp_path).ensure()
+    bootstrapped.cookies_file.write_text(NETSCAPE, encoding="utf-8")
+    bootstrapped.merge_meta(source="cdp-bootstrap")
+    session = SessionManager(Settings(account="bootstrapped"))
+    assert session.source == "bootstrap"
+    session.invalidate("HTTP 403 on /x")
+    assert not bootstrapped.cookies_file.exists(), "our own cache should be discarded"

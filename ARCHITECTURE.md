@@ -112,7 +112,8 @@ Services(settings)                       # get_services(account) 按账号缓存
   ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
   ├─ ProfileClient(transport, session, settings)
   ├─ SearchClient(transport, session, settings)
-  ├─ MessageClient(transport, session, settings, profile_client)   # 复用 profile 解析用户名
+  ├─ LightspeedSender(settings, session)                          # 协议发送通道
+  ├─ MessageClient(transport, session, settings, profile_client, lightspeed_client)
   ├─ PostService(profile_client)
   ├─ SearchService(search_client)
   └─ MessageService(message_client)
@@ -206,7 +207,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 361 项测试(全部离线)
+└── tests/                           # 370 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -254,6 +255,8 @@ facebook-mcp/
   | `cdp_timeout` | `FB_CDP_TIMEOUT` | `60.0` |
   | `cdp_cookie_bootstrap` | `FB_CDP_COOKIE_BOOTSTRAP` | `true` |
   | `route_doc_ids` | `FB_ROUTE_DOC_IDS` | `{}`(通常由 `account.json` 的 `doc_ids` 注入,§5.4) |
+  | `message_transport` | `FB_MESSAGE_TRANSPORT` | `auto`(`lightspeed` / `ui` / `auto`,§6.3) |
+  | `persist_browser_cookies` | `FB_PERSIST_BROWSER_COOKIES` | `true`(引导后写入账户库,§5.3) |
 
 - `exceptions.py` —— 异常体系(§7)。
 - `accounts.py` —— 凭据存储布局(§5.8):`AccountPaths`、名称校验、0600/0700 权限、账户列表。
@@ -341,7 +344,8 @@ class Transport(Protocol):
     后续鉴权直接失败并提示重新导出 + 重启,而不是拿死 cookie 反复重试
   - `rejected`:最近一次被拒绝的原因(`None` 表示正常)
   - `learn_from_html()`:从页面刷新 `lsd` / `fb_dtsg`
-  - `from_config`:cookie 是否来自配置或账户库(而非浏览器),决定是否走纯协议(见 §9.3)
+  - `from_config`:cookie 是否来自配置/账户库(而非浏览器)——**不再是选路依据**,
+    只用于判断这份 jar 能否在失效后被丢弃(见 §9.4)
 
 > cookie 从浏览器提取的实际路径是 `SessionManager(cookie_provider=cdp.cookies)`,
 > 由 `services/factory.py` 注入;`extractor.py` 本身不接触 CDP。
@@ -525,7 +529,7 @@ class Transport(Protocol):
 |---|---|---|
 | `get_user_latest_post_time` / `get_user_recent_posts` | **否** | 主页 HTML 公开可读 |
 | `search_people` / `search_pages` | **是** | 未登录直接 404;GraphQL 需 `fb_dtsg` |
-| `send_message` | **否(但需要浏览器)** | 发送使用 Chrome 自身的登录态,不读本项目的 cookie 文件 |
+| `send_message` | **是(Lightspeed)/ 浏览器需同身份(UI)** | Lightspeed 用账户库的 cookie 直连网关;回退 UI 时用 Chrome 自己的登录态,所以必须先核对浏览器与账户库是同一个 `c_user`(§5.5) |
 
 **权限防护**
 
@@ -910,14 +914,19 @@ client 是**逻辑**。**接口参数与模板**的变化只改 `routes/`,业务
 
 ### 9.3 协议优先的传输选择
 
-由 `BaseClient` 决定 `transport_hint`:
+`BaseClient` **不再按凭据来源切换通道**:`require_auth()` 先确保会话里有 jar
+(必要时从浏览器引导一次),随后请求统一交给配置的 transport(`auto` 下即 curl_cffi)。
+浏览器只在显式需要它的地方出现。
 
-| 条件 | 通道 |
+| 场景 | 通道 |
 |---|---|
-| 公开读(`requires_auth=False`) | curl_cffi |
-| 需登录 **且** 会话里已有 cookie(账户库、配置,或刚引导来的) | **curl_cffi(纯协议)** |
-| 需登录 **且** 一点 cookie 都没有 | CDP 引导**一次**,随后该请求也走 curl_cffi |
-| 发送消息 | 协议优先(Lightspeed WS);通道不可用才回退 CDP UI(`FB_MESSAGE_TRANSPORT`) |
+| 公开读(`requires_auth=False`) | curl_cffi,不带 cookie(`credentials="omit"`) |
+| 需登录 | `require_auth()` 保证有 jar(缺失时从浏览器引导一次)→ curl_cffi |
+| 浏览器驱动 | 只经由 `cdp_from()` 的路径:cookie 引导、Messenger UI |
+| 发送消息 | `FB_MESSAGE_TRANSPORT`:`lightspeed` / `ui` / `auto`(协议优先,失败回退 UI) |
+
+`HttpRequest.transport_hint` 仍保留,但 client 不再设置它;它只供测试与工具
+显式指定通道(§9.1 的 `BrowserTransport` 才是 client 依赖的浏览器契约)。
 
 ### 9.4 会话生命周期独立成层
 
@@ -947,7 +956,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(361 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(370 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -992,7 +1001,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:361 项,覆盖 17 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:369 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)
@@ -1018,9 +1027,10 @@ MCP 层只做转发,不含业务逻辑。
   `ParseError`,需要更新 client 里的选择器;这也是 §8.6/§9.2 把「改版只改 routes/」
   限定在接口参数与模板上的原因。发送前还会校验收件人,读不到名字时宁可拒发。
 - **送达不可证**:Web UI 不暴露服务端回执,`delivery="submitted"` 只代表已提交,
-  不代表对方收到;`unknown` 必须人工确认会话后才能重试。实测中 FB 会先清空输入框、
-  再在气泡上标 "Couldn't send"(且该气泡的无障碍标签仍写 "Message sent"),
-  因此 `rejected` 依赖 UI 文案匹配,属于 best-effort,换语言/改版可能失效。
+  不代表对方收到。只有 Lightspeed 网关明确回 `markOptimisticMessageFailed` 才报
+  `rejected`;UI 路径看到 "Couldn't send" 也无法证明是**这条**消息(文本可能恰好相同),
+  只报 `unknown`。实测中该气泡的无障碍标签仍写 "Message sent",进一步说明 UI 文本
+  不能作为送达或拒收的证据。
 - **合规**:仅用于授权账号;发送营销消息需遵守 Facebook 平台政策与
   反垃圾法规(如 CAN-SPAM、GDPR)。
 

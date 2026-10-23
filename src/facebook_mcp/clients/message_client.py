@@ -32,6 +32,7 @@ from typing import Any
 
 from ..core.config import Settings
 from ..core.exceptions import (
+    AuthError,
     FacebookError,
     ParseError,
     SendRejectedError,
@@ -229,6 +230,10 @@ class MessageClient(BaseClient):
                 return over_protocol
 
         cdp = self._require_browser()
+        # The protocol path authenticates with this account's cookie jar; the UI
+        # path authenticates with whatever Chrome is logged in as. Falling back
+        # without comparing the two would send as a different identity.
+        self._assert_ui_identity(cdp)
 
         thread_id, composer_target = self._open_thread(cdp, uid)
         try:
@@ -350,6 +355,47 @@ class MessageClient(BaseClient):
         if self._limiter is not None:
             self._limiter.wait()
 
+    def _assert_ui_identity(self, cdp: BrowserTransport) -> None:
+        """Refuse to drive the UI as an identity other than this account's.
+
+        The protocol path authenticates with this account's cookie jar; the DOM
+        path authenticates with whatever Chrome is logged in as. Falling back
+        without comparing the two can silently send as somebody else.
+        """
+        live = cdp.cookies()
+        browser_id = live.get("c_user")
+        expected = self._session.state.user_id
+
+        if not browser_id:
+            raise AuthError(
+                "the attached browser is not logged in to Facebook, so the UI path "
+                "would send as nobody; log in there or use message_transport=lightspeed"
+            )
+        if expected is None:
+            # No configured jar at all: the browser is the only identity there is.
+            self._session.bootstrap_from_browser()
+            return
+        if browser_id == expected:
+            return
+        if self._session.source == "bootstrap":
+            # The jar is our own cache of an earlier browser login; the browser is
+            # authoritative and has simply moved to another account.
+            logger.warning(
+                "browser identity changed from c_user=%s to c_user=%s; adopting it",
+                expected,
+                browser_id,
+            )
+            self._session.bootstrap_from_browser()
+            return
+
+        account = self._settings.account if self._settings else "?"
+        raise AuthError(
+            "refusing to send over the UI: the browser is logged in as "
+            f"c_user={browser_id} while account {account!r} is c_user={expected}. "
+            "The message would come from the wrong identity; open Chrome with this "
+            "account's profile, or use message_transport=lightspeed"
+        )
+
     def _open_thread(self, cdp: BrowserTransport, uid: str) -> tuple[str, str | None]:
         """Open the conversation for ``uid`` and verify it is the right one.
 
@@ -438,17 +484,6 @@ class MessageClient(BaseClient):
                 f"({expected!r}); opened via {how}, nothing was sent"
             )
 
-        if how == "profile Message button":
-            # We reached this box by clicking "Message" on profile.php?id=<uid>,
-            # so the uid is verified even though a brand-new thread id is not.
-            logger.warning(
-                "thread %s for %s was verified only by the profile Message button "
-                "(the recipient's name could not be read)",
-                thread_id,
-                uid,
-            )
-            return thread_id, target
-
         raise ParseError(
             f"refusing to send: thread {thread_id} (addressed to {target!r}) is not "
             f"recipient {uid} and its name could not be resolved to double-check; "
@@ -532,10 +567,22 @@ class MessageClient(BaseClient):
 
     @staticmethod
     def _profile_name(cdp: BrowserTransport) -> str | None:
-        """The profile page's heading, used to verify the composer it opens."""
+        """The profile's display name, used to verify the composer it opens.
+
+        Tries the heading first, then the document title (``Name | Facebook``),
+        so a layout tweak does not silently downgrade the verification to "no
+        name available" — which now means "refuse".
+        """
         raw = cdp.evaluate(
-            "(() => { const h = document.querySelector('h1'); "
-            "return h ? (h.innerText || '').trim() : null; })()"
+            """
+(() => {
+  const heading = document.querySelector('[role="main"] h1') || document.querySelector('h1');
+  const fromHeading = heading ? (heading.innerText || '').trim() : '';
+  if (fromHeading) return fromHeading;
+  const title = (document.title || '').replace(/\\s*[|·—-]\\s*Facebook.*$/i, '').trim();
+  return title || null;
+})()
+"""
         )
         return str(raw).strip() if raw else None
 
@@ -721,15 +768,25 @@ class MessageClient(BaseClient):
         # From here on the message may be on the wire. Anything that goes wrong
         # after this point is an *unobservable* outcome: reporting it as
         # "not_sent" would invite a duplicate resend.
+        # No send button and no composer means nothing was clicked *and* nothing
+        # was typed: this must stay "not sent", so it happens before the block
+        # where any failure is by definition unobservable.
+        clicked = self._click_send(cdp)
+        if not clicked and self._composer_text(cdp) is None:
+            raise ParseError(
+                "the Messenger composer disappeared before the message could be "
+                "sent; nothing was sent"
+            )
+
         try:
-            if not self._click_send(cdp):
+            if not clicked:
                 # No send button. Pressing Enter is only safe while our composer
                 # still exists — otherwise the keystroke lands on whatever has
                 # focus and could trigger something unrelated.
                 if self._composer_text(cdp) is None:
-                    raise FacebookError(
-                        "the Messenger composer disappeared before the message "
-                        "could be sent; nothing was sent"
+                    raise ParseError(
+                        "the Messenger composer disappeared before Enter could be "
+                        "pressed; nothing was sent"
                     )
                 self._press_enter(cdp)
 

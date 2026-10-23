@@ -7,6 +7,7 @@ import pytest
 from facebook_mcp.clients.message_client import MessageClient
 from facebook_mcp.core.config import Settings
 from facebook_mcp.core.exceptions import (
+    AuthError,
     FacebookError,
     ParseError,
     SendUncertainError,
@@ -55,6 +56,7 @@ class FakeCdp:
         message_button: bool = True,
         live_cookies: dict[str, str] | None = None,
         composer_target: str | None = None,
+        profile_name: str | None = None,
         redirect_thread: str | None = None,
         send_fails: bool = False,
         existing_failures: int = 0,
@@ -73,8 +75,12 @@ class FakeCdp:
         self.send_button = send_button
         self.thread_row = thread_row
         self.message_button = message_button
-        self.live_cookies = live_cookies or {}
+        # Default: the browser is logged in as the same identity as the jar,
+        # which is what the identity check expects. Pass live_cookies to test
+        # a mismatch.
+        self.live_cookies = live_cookies if live_cookies is not None else {"c_user": "1", "xs": "2"}
         self.composer_target = composer_target
+        self.profile_name = profile_name
         self.redirect_thread = redirect_thread
         self.send_fails = send_fails
         self.existing_failures = existing_failures
@@ -191,6 +197,8 @@ class FakeCdp:
                 if self.vanish_after_send:
                     self.composer_open = False
             return True
+        if "document.querySelector('[role=\"main\"] h1')" in expression:
+            return self.profile_name
         if "const markers =" in expression:
             return self.existing_failures + (1 if self.send_failed else 0)
         if "return composerTarget" in expression:
@@ -207,12 +215,14 @@ def _client(transport, **kwargs) -> MessageClient:
     return MessageClient(transport, session, Settings(message_transport="ui"), **kwargs)
 
 
-def _page_client(transport, **kwargs) -> MessageClient:
+def _page_client(transport, *, live_page: bool = True, **kwargs) -> MessageClient:
     """A client whose session is switched into a Page (``i_user`` present)."""
-    session = SessionManager(
-        Settings(cookie="c_user=100000000000001; xs=2; i_user=1", cookie_file=None)
-    )
+    session = SessionManager(Settings(cookie="c_user=1; xs=2; i_user=1", cookie_file=None))
     assert session.state.acting_as_page is True
+    if live_page and hasattr(transport, "live_cookies"):
+        # The live browser must agree with the snapshot, otherwise _acting_as_page
+        # treats a personal browser as authoritative.
+        transport.live_cookies = {**transport.live_cookies, "c_user": "1", "i_user": "1"}
     return MessageClient(transport, session, Settings(message_transport="ui"), **kwargs)
 
 
@@ -249,6 +259,8 @@ def test_send_starts_new_conversation_from_profile() -> None:
         composer_on_thread=False,
         composer_after_row_click=False,
         composer_after_profile=True,
+        profile_name="Example Person",
+        composer_target="Example Person",
     )
     result = _client(cdp).send("100000000000003", "hi")
     assert result.ok is True
@@ -320,6 +332,8 @@ def test_personal_account_still_uses_profile_fallback() -> None:
         composer_on_thread=False,
         composer_after_row_click=False,
         composer_after_profile=True,
+        profile_name="Example Person",
+        composer_target="Example Person",
     )
     result = _client(cdp).send("100000000000003", "hi")
     assert result.ok is True
@@ -332,7 +346,7 @@ def test_page_actor_detected_from_live_browser_cookies() -> None:
     cdp = FakeCdp(
         composer_on_thread=False,
         composer_after_row_click=False,
-        live_cookies={"c_user": "100000000000001", "i_user": "1"},
+        live_cookies={"c_user": "1", "i_user": "1"},
     )
     with pytest.raises(UnsupportedError, match="acting as a Page"):
         _client(cdp).send("100000000000003", "hi")
@@ -344,7 +358,9 @@ def test_live_cookies_without_i_user_are_not_a_page() -> None:
         composer_on_thread=False,
         composer_after_row_click=False,
         composer_after_profile=True,
-        live_cookies={"c_user": "100000000000001", "xs": "2"},
+        live_cookies={"c_user": "1", "xs": "2"},
+        profile_name="Example Person",
+        composer_target="Example Person",
     )
     assert _client(cdp).send("100000000000003", "hi").ok is True
     assert cdp.mouse_clicks == 1
@@ -499,8 +515,10 @@ def test_stale_page_snapshot_does_not_block_live_personal_session() -> None:
         composer_after_row_click=False,
         composer_after_profile=True,
         live_cookies={"c_user": "1"},  # live: personal, no i_user
+        profile_name="Example Person",
+        composer_target="Example Person",
     )
-    result = _page_client(cdp).send("100000000000003", "hi")
+    result = _page_client(cdp, live_page=False).send("100000000000003", "hi")
     assert result.ok is True
     # It went all the way to the profile fallback instead of refusing.
     assert cdp.navigations[-1].startswith("https://www.facebook.com/profile.php?id=")
@@ -515,8 +533,10 @@ def test_empty_live_jar_falls_back_to_the_snapshot() -> None:
         composer_after_profile=True,
         live_cookies={},
     )
-    with pytest.raises(UnsupportedError, match="acting as a Page"):
-        _page_client(cdp).send("100000000000003", "hi")
+    # The identity check runs first: an unreadable browser identity is a refusal
+    # on its own, so the Page probe never gets a chance to guess.
+    with pytest.raises(AuthError, match="not logged in"):
+        _page_client(cdp, live_page=False).send("100000000000003", "hi")
 
 
 def test_live_page_overrides_personal_snapshot() -> None:
@@ -862,3 +882,101 @@ def test_protocol_rejection_is_final_in_lightspeed_mode() -> None:
     with pytest.raises(SendRejectedError):
         client.send("200000000000001", "hello")
     assert cdp.sent is False
+
+
+# --- identity: the UI must not send as another account -------------------
+
+
+def test_ui_refuses_when_the_browser_is_a_different_account() -> None:
+    """The protocol path uses the jar; the UI path uses the browser's login."""
+    cdp = FakeCdp(composer_on_thread=True)
+    cdp.live_cookies = {"c_user": "999", "xs": "other"}  # browser = account B
+
+    with pytest.raises(AuthError, match="wrong identity"):
+        _client(cdp).send("200000000000001", "hi")
+
+    assert cdp.inserted == [], "text was typed into another identity's session"
+    assert cdp.sent is False
+
+
+def test_ui_adopts_a_moved_browser_when_the_jar_was_its_own_cache() -> None:
+    """A bootstrapped jar is a cache: the browser stays authoritative."""
+    provider_calls: list[int] = []
+
+    def provider() -> dict[str, str]:
+        provider_calls.append(1)
+        return (
+            {"c_user": "1", "xs": "2"}
+            if len(provider_calls) == 1
+            else {
+                "c_user": "2",
+                "xs": "3",
+            }
+        )
+
+    session = SessionManager(Settings(), provider)
+    assert session.bootstrap_from_browser() is True
+    assert session.source == "bootstrap"
+
+    cdp = FakeCdp(composer_on_thread=True)
+    cdp.live_cookies = {"c_user": "2", "xs": "3"}
+    client = MessageClient(cdp, session, Settings(message_transport="ui"))
+    result = client.send("200000000000001", "hi")
+
+    assert result.ok is True
+    assert session.state.user_id == "2"
+
+
+def test_ui_refuses_an_unreadable_browser_identity() -> None:
+    cdp = FakeCdp(composer_on_thread=True)
+    cdp.live_cookies = {}
+    with pytest.raises(AuthError, match="not logged in"):
+        _client(cdp).send("200000000000001", "hi")
+
+
+# --- recipient verification: no name means no send -----------------------
+
+
+def test_profile_fallback_refuses_when_the_name_cannot_be_read() -> None:
+    """§5.5 promises "refuse when the name is unreadable"; hold it to that."""
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+        composer_target="Somebody Else",  # a label we cannot match to the target
+    )
+    with pytest.raises(ParseError, match="could not be resolved"):
+        _client(cdp).send("100000000000003", "hi")
+    assert cdp.sent is False
+
+
+def test_profile_fallback_refuses_a_name_mismatch() -> None:
+    cdp = FakeCdp(
+        composer_on_thread=False,
+        composer_after_row_click=False,
+        composer_after_profile=True,
+        profile_name="Alice",
+        composer_target="Bob",
+    )
+    with pytest.raises(ParseError, match="does not match recipient"):
+        _client(cdp).send("100000000000003", "hi")
+    assert cdp.sent is False
+
+
+# --- a pre-send abort is not "unknown" ----------------------------------
+
+
+def test_vanish_before_enter_is_reported_as_not_sent() -> None:
+    """Nothing was clicked or typed, so a retry must be marked safe."""
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(
+        composer_on_thread=True,
+        send_button=False,
+        vanish_before_click=True,
+    )
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hello")
+
+    assert result.ok is False
+    assert result.delivery == "not_sent"
+    assert cdp.key_events == [], "Enter must not be pressed on a vanished composer"

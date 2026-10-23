@@ -130,7 +130,8 @@ Services(settings)                       # get_services(account) caches one grap
   ├─ SessionManager(settings, cookie_provider=transport.cdp.cookies)
   ├─ ProfileClient(transport, session, settings)
   ├─ SearchClient(transport, session, settings)
-  ├─ MessageClient(transport, session, settings, profile_client)   # reuses username resolution
+  ├─ LightspeedSender(settings, session)                          # protocol send channel
+  ├─ MessageClient(transport, session, settings, profile_client, lightspeed_client)
   ├─ PostService(profile_client)
   ├─ SearchService(search_client)
   └─ MessageService(message_client)
@@ -224,7 +225,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 361 tests (all offline)
+└── tests/                           # 370 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -272,6 +273,8 @@ facebook-mcp/
   | `cdp_timeout` | `FB_CDP_TIMEOUT` | `60.0` |
   | `cdp_cookie_bootstrap` | `FB_CDP_COOKIE_BOOTSTRAP` | `true` |
   | `route_doc_ids` | `FB_ROUTE_DOC_IDS` | `{}` (normally injected from `doc_ids` in `account.json`, §5.4) |
+  | `message_transport` | `FB_MESSAGE_TRANSPORT` | `auto` (`lightspeed` / `ui` / `auto`, §6.3) |
+  | `persist_browser_cookies` | `FB_PERSIST_BROWSER_COOKIES` | `true` (write the bootstrapped jar, §5.3) |
 
 - `exceptions.py` — exception hierarchy (§7).
 - `accounts.py` — credential layout (§5.8): `AccountPaths`, name validation,
@@ -376,8 +379,9 @@ class Transport(Protocol):
     calls fail with "re-export and restart" instead of replaying a dead cookie
   - `rejected`: why the session was last rejected (`None` when healthy)
   - `learn_from_html()`: refreshes `lsd` / `fb_dtsg` from a page
-  - `from_config`: whether cookies came from configuration or the account store
-    rather than the browser; this drives the protocol-first transport choice (§9.3)
+  - `from_config`: whether cookies came from configuration/the account store
+    rather than the browser. It no longer chooses a transport — it only decides
+    whether the jar may be discarded after a rejection (§9.4)
 
 > Cookies are bootstrapped through
 > `SessionManager(cookie_provider=cdp.cookies)`, injected by
@@ -599,7 +603,7 @@ With no source at all the server runs anonymously (public pages only).
 |---|---|---|
 | `get_user_latest_post_time` / `get_user_recent_posts` | **no** | the profile HTML is public |
 | `search_people` / `search_pages` | **yes** | logged-out search returns 404; GraphQL needs `fb_dtsg` |
-| `send_message` | **no (but needs a browser)** | sending uses Chrome's own session, never this project's cookie file |
+| `send_message` | **yes (Lightspeed) / same-identity browser (UI)** | Lightspeed uses the account store's cookie against the gateway; the UI fallback uses Chrome's login, so the browser and the store must hold the same `c_user` (§5.5) |
 
 **Permission safeguards**
 
@@ -1015,14 +1019,21 @@ layout change requires a client change (§11 already lists it as brittle). See
 
 ### 9.3 Protocol-first transport selection
 
-`BaseClient` decides `transport_hint`:
+`BaseClient` **no longer switches channels by credential source**: `require_auth()`
+first guarantees a jar (bootstrapping from the browser once if needed), then the
+request goes to the configured transport (curl_cffi under `auto`). The browser
+appears only where it is explicitly needed.
 
-| Condition | Channel |
+| Case | Channel |
 |---|---|
-| public read (`requires_auth=False`) | curl_cffi |
-| login required **and** the session already holds cookies (store, config, or just bootstrapped) | **curl_cffi (pure protocol)** |
-| login required **and** no cookies at all | CDP **once** to bootstrap them; that same request then uses curl_cffi |
-| sending a message | protocol first (Lightspeed WS); the CDP UI is only a fallback (`FB_MESSAGE_TRANSPORT`) |
+| public read (`requires_auth=False`) | curl_cffi, no cookies (`credentials="omit"`) |
+| login required | `require_auth()` ensures a jar (bootstraps once) → curl_cffi |
+| browser-driven | only through `cdp_from()`: cookie bootstrap, Messenger UI |
+| messaging | `FB_MESSAGE_TRANSPORT`: `lightspeed` / `ui` / `auto` (protocol first, UI fallback) |
+
+`HttpRequest.transport_hint` still exists, but clients no longer set it; it is for
+tests and tools that pin a channel (§9.1's `BrowserTransport` is the browser
+contract clients actually depend on).
 
 ### 9.4 Session lifecycle is its own layer
 
@@ -1055,7 +1066,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (361), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (370), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1103,7 +1114,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 361 across 17 files (including a CDP integration test against a mock DevTools server)
+- Tests: 370 across 21 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

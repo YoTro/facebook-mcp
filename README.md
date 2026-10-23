@@ -76,7 +76,7 @@ automatically: `FB_PROXY` → `HTTPS_PROXY` env → macOS system proxy.
 | `get_user_recent_posts` | no | Recent posts (text, time, permalink) |
 | `search_people` | **yes** | Keyword search for people |
 | `search_pages` | **yes** | Keyword search for pages |
-| `send_message` | **yes** (+ browser) | Send a Messenger message; the result's `delivery` says whether a retry is safe |
+| `send_message` | **yes** | Sends over the Lightspeed WebSocket with the account's cookies; the UI fallback needs a browser logged in as the **same** account. `delivery` says whether a retry is safe |
 
 ## Credentials: `~/.facebook-mcp/`
 
@@ -97,7 +97,7 @@ Facebook cookies (`ARCHITECTURE.en.md` §8.1):
 |---|---|---|
 | `get_user_latest_post_time` / `get_user_recent_posts` | **no** | 200 + full timeline |
 | `search_people` / `search_pages` | **yes** | 404 on the search page; GraphQL replies "Rate limit exceeded" |
-| `send_message` | no (but needs a browser) | uses Chrome's own session |
+| `send_message` | **yes** for Lightspeed; a same-identity browser for the UI fallback | Lightspeed authenticates with the account jar; the UI path uses Chrome's login, so both must be the same `c_user` |
 
 ### Populate an account
 
@@ -211,7 +211,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (361 tests, fully offline) |
+| `make test` | `pytest -q` (370 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

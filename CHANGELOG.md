@@ -331,6 +331,27 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   fail the same way. The marker is localised UI text (en/zh/es), so the check is
   best-effort and documented as such.
 
+- The UI fallback could send as a *different* account: Lightspeed authenticates
+  with the account jar while the DOM path uses the browser's login, and nothing
+  compared the two. Before any UI work the client now reads the live `c_user`
+  and refuses on a mismatch (`not_sent`), adopting the browser only when the jar
+  is our own bootstrap cache.
+- `_confirm_thread()` still accepted a brand-new thread opened from the profile
+  when neither the id matched nor the recipient's name was readable, contradicting
+  the documented "refuse when the name cannot be read". That branch is gone, and
+  the profile name now falls back to `document.title` before giving up.
+- `tools/import_cookies.py` rewrote `cookies.txt` without touching `account.json`,
+  so a leftover `source: cdp-bootstrap` kept marking the user's jar as a cache and
+  `invalidate()` deleted it. Imports now write `source: import` (plus c_user /
+  authenticated / timestamp), and tests prove imported jars survive invalidation.
+- An `https://` proxy was silently rewritten to `proxy_type="http"` for the
+  Lightspeed WebSocket, which would send a plaintext CONNECT to a TLS port.
+  It now raises `LightspeedError` and suggests an `http://` / `socks5://` proxy or
+  `message_transport=ui`.
+- A pre-send abort (no send button *and* the composer gone before Enter) was
+  re-labelled as `unknown` by the post-click error wrapper. It happens before any
+  submit now, so it stays `not_sent` and a retry is safe.
+
 ### Planned
 
 - Pagination for `search_*` (the `end_cursor` is already parsed by

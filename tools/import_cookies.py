@@ -27,6 +27,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -187,6 +188,24 @@ def write_netscape(cookies: list[dict[str, str]], out: Path) -> None:
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def record_import(paths: AccountPaths, cookies: list[dict[str, str]]) -> None:
+    """Mark the jar as user-supplied so invalidate() never deletes it.
+
+    A previous run may have persisted a browser bootstrap and left
+    ``source="cdp-bootstrap"`` behind; without this the freshly imported file
+    would still look like a cache this process owns, and an auth failure would
+    delete a jar the user cannot reproduce in-process.
+    """
+    values = {cookie["name"]: cookie["value"] for cookie in cookies}
+    authenticated = {"c_user", "xs"} <= set(values)
+    paths.merge_meta(
+        c_user=values.get("c_user") if authenticated else None,
+        authenticated=authenticated,
+        updated_at=int(time.time()),
+        source="import",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import Chrome cookies for a domain")
     parser.add_argument("--domain", default="facebook.com")
@@ -209,12 +228,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.out:
-        out = Path(args.out)
+        write_netscape(cookies, Path(args.out))
+        Path(args.out).chmod(0o600)
+        print(f"written : {args.out} (mode 600)")
     else:
-        out = AccountPaths.for_account(args.account, args.home).ensure().cookies_file
-    write_netscape(cookies, out)
-    out.chmod(0o600)
-    print(f"written : {out} (mode 600)")
+        paths = AccountPaths.for_account(args.account, args.home).ensure()
+        write_netscape(cookies, paths.cookies_file)
+        paths.cookies_file.chmod(0o600)
+        record_import(paths, cookies)
+        print(f"written : {paths.cookies_file} (mode 600)")
 
     names = {c["name"] for c in cookies}
     if {"c_user", "xs"} <= names:
