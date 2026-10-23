@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from facebook_mcp.clients.message_client import MessageClient
@@ -11,6 +13,7 @@ from facebook_mcp.core.exceptions import (
     FacebookError,
     ParseError,
     SendUncertainError,
+    TransportError,
     UnsupportedError,
 )
 from facebook_mcp.core.models import Profile
@@ -65,6 +68,7 @@ class FakeCdp:
         switch_target_after_insert: str | None = None,
         clear_target_after_insert: bool = False,
         vanish_before_click: bool = False,
+        click_reply_lost: bool = False,
         url: str = "https://www.facebook.com/messages/t/200000000000001/",
     ) -> None:
         self.composer_on_thread = composer_on_thread
@@ -90,6 +94,7 @@ class FakeCdp:
         self.switch_target_after_insert = switch_target_after_insert
         self.clear_target_after_insert = clear_target_after_insert
         self.vanish_before_click = vanish_before_click
+        self.click_reply_lost = click_reply_lost
         self.url = url
 
         self.composer_open = False
@@ -184,6 +189,11 @@ class FakeCdp:
         if "return !!composer" in expression:
             return self.composer_open
         if "sendButton.click()" in expression:
+            if self.click_reply_lost:
+                # The browser ran the click; the socket died before the reply.
+                self.composer_text = ""
+                self.sent = True
+                raise TransportError("CDP connection lost after dispatching the click")
             if self.vanish_before_click:
                 # e.g. the box was replaced between typing and clicking
                 self.composer_open = False
@@ -980,3 +990,47 @@ def test_vanish_before_enter_is_reported_as_not_sent() -> None:
     assert result.ok is False
     assert result.delivery == "not_sent"
     assert cdp.key_events == [], "Enter must not be pressed on a vanished composer"
+
+
+# --- submission boundary ------------------------------------------------
+
+
+def test_a_click_whose_reply_is_lost_is_unknown() -> None:
+    """The JS may have run: a false "not_sent" would duplicate the message."""
+    from facebook_mcp.services.message_service import MessageService
+
+    cdp = FakeCdp(composer_on_thread=True, click_reply_lost=True)
+    result = MessageService(_client(cdp)).send_message("200000000000001", "hi")
+
+    assert cdp.sent is True, "the fake did not execute the click"
+    assert result.ok is False
+    assert result.delivery == "unknown"
+    assert "may have executed" in (result.error or "")
+
+
+def test_identity_sync_failure_refuses_instead_of_sending_as_the_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Jar cached from A + bootstrapping off + browser on B must not send."""
+    from facebook_mcp.core.accounts import AccountPaths
+
+    monkeypatch.setenv("FB_HOME", str(tmp_path))
+    paths = AccountPaths.for_account("default", tmp_path).ensure()
+    paths.cookies_file.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".facebook.com\tTRUE\t/\tTRUE\t0\tc_user\t111\n"
+        ".facebook.com\tTRUE\t/\tTRUE\t0\txs\ttok\n",
+        encoding="utf-8",
+    )
+    paths.merge_meta(source="cdp-bootstrap")
+
+    settings = Settings(cdp_cookie_bootstrap=False, message_transport="ui")
+    session = SessionManager(settings)  # no cookie provider on purpose
+    cdp = FakeCdp(composer_on_thread=True)
+    cdp.live_cookies = {"c_user": "222", "xs": "other"}
+
+    client = MessageClient(cdp, session, settings)
+    with pytest.raises(AuthError, match="cannot be refreshed"):
+        client.send("200000000000001", "hi")
+    assert cdp.sent is False
+    assert session.state.user_id == "111", "the session must not silently switch"

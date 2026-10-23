@@ -352,6 +352,26 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   re-labelled as `unknown` by the post-click error wrapper. It happens before any
   submit now, so it stays `not_sent` and a retry is safe.
 
+- The submission boundary was still wrong in two directions: a click whose CDP
+  reply was lost returned `not_sent` (inviting a duplicate), while a composer that
+  vanished before Enter — nothing submitted — was reported `unknown`. The click and
+  the Enter dispatch now sit on the "may have been submitted" side, and only the
+  provably-pre-submit checks stay `not_sent`; both directions have tests.
+- `_assert_ui_identity()` adopted the browser identity without checking that the
+  sync worked: with `FB_CDP_COOKIE_BOOTSTRAP=false` and a stale jar from account A,
+  the UI could still send as browser account B. It now requires the bootstrap to
+  succeed *and* the session to end up with the browser's `c_user`, else refuses.
+- Browser bootstrapping merged cookies with `update()`, so an old `i_user` (Page
+  actor) survived an account switch, and CSRF tokens from the previous login were
+  kept. A bootstrap now replaces the snapshot and clears `fb_dtsg` / `lsd`.
+- `_ensure_dtsg()` fetched the home page with `require_auth=False`, so a 401/403
+  there never invalidated the session and every later call replayed the dead jar.
+  That request now invalidates on an auth failure while still not demanding a login.
+- The Lightspeed endpoint, protocol version, build id and task names moved from
+  `clients/lightspeed_client.py` to `routes/lightspeed.py`, matching the `doc_id`
+  rule ("endpoints are data"). `LightspeedSender` keeping its own WebSocket session
+  is documented as the one deliberate exception to the transport/client split.
+
 ### Planned
 
 - Pagination for `search_*` (the `end_cursor` is already parsed by

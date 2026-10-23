@@ -249,11 +249,18 @@ class BaseClient:
             return
 
         logger.debug("fetching home page to obtain fb_dtsg/lsd")
-        resp = self._request(
-            Route(op="session.home", method="GET", path="/"),
-            url=FACEBOOK_BASE + "/",
-            require_auth=False,
-        )
+        try:
+            resp = self._request(
+                Route(op="session.home", method="GET", path="/"),
+                url=FACEBOOK_BASE + "/",
+                # The request carries cookies but does not *demand* a login; a
+                # rejection here still proves the jar is dead, so it must
+                # invalidate rather than be retried forever.
+                require_auth=False,
+            )
+        except AuthError:
+            self._session.invalidate("the home page refused the credentials")
+            raise
         self._session.learn_from_html(resp.text)
 
     # --- error translation ---------------------------------------------

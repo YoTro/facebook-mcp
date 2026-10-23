@@ -199,7 +199,21 @@ class SessionManager:
         if not cookies:
             return False
 
-        self._state.cookies.update(cookies)
+        # Replace, never merge: `update()` keeps cookies the new snapshot does not
+        # have (an `i_user` from the previous Page identity survives an account
+        # switch and then lies to every actor probe).
+        previous_id = self._state.user_id
+        self._state.cookies = dict(cookies)
+        # CSRF tokens belong to the login we just replaced; they are cheap to
+        # re-learn, and keeping them mixes two identities' credentials.
+        self._state.fb_dtsg = None
+        self._state.lsd = None
+        if previous_id and self._state.user_id != previous_id:
+            logger.warning(
+                "browser session switched identity from c_user=%s to c_user=%s",
+                previous_id,
+                self._state.user_id,
+            )
         if not self._state.is_authenticated:
             logger.warning(
                 "got %d browser cookies but no c_user/xs — Chrome is not logged in to Facebook",

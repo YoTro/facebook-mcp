@@ -382,3 +382,43 @@ def test_browser_backed_session_recovers_after_invalidation() -> None:
     session.require_auth()
     assert session.state.user_id == "9"
     assert session.rejected is None
+
+
+# --- session refresh ----------------------------------------------------
+
+
+def test_bootstrap_replaces_the_snapshot_and_resets_tokens() -> None:
+    """Merging kept the previous identity's cookies (an `i_user` survived)."""
+    calls: list[int] = []
+
+    def provider() -> dict[str, str]:
+        calls.append(1)
+        return (
+            {"c_user": "111", "xs": "a", "i_user": "9"}
+            if len(calls) == 1
+            else {"c_user": "222", "xs": "b"}
+        )
+
+    session = SessionManager(Settings(), provider)
+    session.require_auth()
+    assert session.state.cookies["i_user"] == "9"
+    session.state.fb_dtsg = "OLD"
+    session.state.lsd = "OLD"
+
+    session.bootstrap_from_browser()
+
+    assert session.state.cookies == {"c_user": "222", "xs": "b"}
+    assert "i_user" not in session.state.cookies
+    assert session.state.fb_dtsg is None
+    assert session.state.lsd is None
+
+
+def test_home_page_auth_failure_invalidates_the_session() -> None:
+    """_ensure_dtsg() is a credentialed read: a 401 means the jar is dead."""
+    session = SessionManager(Settings(cookie="c_user=1; xs=2"))
+    client = ProfileClient(_StatusTransport(401), session, Settings())  # type: ignore[arg-type]
+
+    with pytest.raises(AuthError):
+        client._ensure_dtsg()
+
+    assert session.rejected is not None

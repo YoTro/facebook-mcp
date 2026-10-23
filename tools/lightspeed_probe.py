@@ -37,24 +37,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from facebook_mcp.core.accounts import AccountPaths
+from facebook_mcp.routes.lightspeed import gateway_url
 from facebook_mcp.services.factory import build_settings
 from facebook_mcp.session.extractor import from_cookie_file
 from facebook_mcp.transport import lightspeed
 
-GATEWAY = "wss://gateway.facebook.com/ws/lightspeed"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
-
-
-def gateway_url(uid: str) -> str:
-    return (
-        f"{GATEWAY}?x-dgw-appid={lightspeed.APP_ID}&x-dgw-appversion=0"
-        f"&x-dgw-authtype=1:0&x-dgw-version=5&x-dgw-uuid={uid}&x-dgw-tier=prod"
-        f"&x-dgw-loggingid={uuid.uuid4()}&x-dgw-regionhint=FTW"
-        f"&x-dgw-deviceid={uuid.uuid4()}"
-    )
 
 
 def load_cookies(account: str) -> dict[str, str]:

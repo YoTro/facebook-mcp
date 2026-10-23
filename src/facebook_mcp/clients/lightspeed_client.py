@@ -31,6 +31,7 @@ from typing import Any
 from ..core.config import Settings
 from ..core.exceptions import AuthError, FacebookError, SendRejectedError, SendUncertainError
 from ..core.logger import get_logger
+from ..routes import lightspeed as gateway
 from ..session.manager import SessionManager
 from ..transport import lightspeed
 from ..transport.proxy import resolve_proxy
@@ -38,7 +39,6 @@ from ..transport.throttle import limiter_for
 
 logger = get_logger(__name__)
 
-GATEWAY = "wss://gateway.facebook.com/ws/lightspeed"
 # Used only when the account has no UA configured; the transport's UA wins so a
 # send and a search never present different browsers.
 USER_AGENT = (
@@ -46,12 +46,11 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
 
-# Version observed on every capture, across threads and sessions: it identifies
-# the client build, not the queue, so it is a constant rather than session state.
-DEFAULT_VERSION_ID = "39529440880004510"
-
-ACCEPT_MARKER = "replaceOptimsiticMessage"
-REJECT_MARKER = "markOptimisticMessageFailed"
+# Endpoint, protocol version, build id and task markers are data: see
+# routes/lightspeed.py (same rotation rule as a GraphQL doc_id).
+DEFAULT_VERSION_ID = gateway.DEFAULT_VERSION_ID
+ACCEPT_MARKER = gateway.ACCEPT_MARKER
+REJECT_MARKER = gateway.REJECT_MARKER
 
 
 class LightspeedError(FacebookError):
@@ -76,14 +75,7 @@ class Ack:
     matched: bool = False
 
 
-def gateway_url(uid: str, *, version: int = 5) -> str:
-    """Build the gateway URL for ``uid`` (auth is cookie-based)."""
-    return (
-        f"{GATEWAY}?x-dgw-appid={lightspeed.APP_ID}&x-dgw-appversion=0"
-        f"&x-dgw-authtype=1:0&x-dgw-version={version}&x-dgw-uuid={uid}"
-        f"&x-dgw-tier=prod&x-dgw-loggingid={uuid.uuid4()}"
-        f"&x-dgw-regionhint=FTW&x-dgw-deviceid={uuid.uuid4()}"
-    )
+gateway_url = gateway.gateway_url
 
 
 class LightspeedSender:

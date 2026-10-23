@@ -180,6 +180,7 @@ facebook-mcp/
 │   │   ├── base.py                  #   Route 数据类 + FACEBOOK_BASE / GRAPHQL_PATH
 │   │   ├── rest.py                  #   页面入口(profile / search 页面 URL)
 │   │   ├── graphql.py               #   doc_id + fb_api_req_friendly_name 注册表
+│   │   ├── lightspeed.py            #   WS 网关端点 / 协议版本 / 构建 id / 任务名
 │   │   └── templates/
 │   │       ├── __init__.py          #   build_search_variables():模板 → 具体 variables
 │   │       └── search_results.json  #   抓包得到的搜索 variables 模板(42 个字段)
@@ -207,7 +208,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 370 项测试(全部离线)
+└── tests/                           # 374 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # 工具注册与 schema
@@ -361,6 +362,10 @@ class Transport(Protocol):
 - `rest.py` —— 页面入口:`PROFILE_PAGE`(`/{username}`)被 `profile_client` 使用;
   `SEARCH_PEOPLE_PAGE` / `SEARCH_PAGES_PAGE` **仅作页面入口记录**(搜索实际走 GraphQL,
   当前无生产代码调用,保留用于导航与诊断)。
+- `lightspeed.py` —— Messenger 发送网关的**数据表**:`GATEWAY` 端点、
+  `PROTOCOL_VERSION`、`DEFAULT_VERSION_ID`(构建 id,像 `doc_id` 一样轮换)、
+  `ACCEPT_MARKER` / `REJECT_MARKER`,以及 `gateway_url()`。帧格式在
+  `transport/lightspeed.py`,会话实现在 `clients/lightspeed_client.py`。
 - `graphql.py` —— `doc_id` 注册表:
 
   | 路由常量 | `doc_id` | `friendly_name` | 状态 |
@@ -385,7 +390,8 @@ class Transport(Protocol):
 ### 5.5 L3 clients
 
 - `base.py` —— `BaseClient(transport, session, settings)`,提供:
-  - `_request()` / `_get()`:合并默认头 + session 头;**决定 `transport_hint`**
+  - `_request()` / `_get()`:合并默认头 + session 头;选路由 transport 决定,
+    client **不再设置** `transport_hint`(§9.3)
   - `_graphql(route, variables)`:构造 Relay 表单,含 `fb_dtsg` / `lsd` /
     **`jazoest`(由 `fb_dtsg` 推导)**
   - `_ensure_dtsg()`:缺 token 时自动拉首页补齐
@@ -633,7 +639,8 @@ server.search_pages("pest control")
       → payload 含 errors → ParseError / AuthError(见 §7)
 ```
 
-`transport_hint` 规则决定这一跳走 curl_cffi 还是浏览器(见 §9.3)。
+这一跳走哪个 transport 由 `require_auth()` 之后的配置决定,client 不再按凭据来源
+切换通道(见 §9.3);搜索全程不需要浏览器。
 
 ### 6.3 发送消息(协议优先,UI 回退)
 
@@ -755,7 +762,7 @@ TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/
 |---|---|---|
 | `get_user_latest_post_time` / `get_user_recent_posts` | **否** | 无痕下 200 且 timeline 完整 |
 | `search_people` / `search_pages` | **是** | 无痕下 404;匿名 GraphQL 被拒 |
-| `send_message` | **否,但需要浏览器登录** | 走 Chrome 自身会话 |
+| `send_message` | **是** | Lightspeed 用账户库 cookie 直连网关;回退 UI 时用 Chrome 会话,且必须与账户库同一个 `c_user`(§5.8) |
 
 **主页 HTML 关键结构**(公开可读):
 
@@ -900,9 +907,14 @@ Messenger,并且**不在别人的 profile 上渲染 `Message` 按钮**(Page 不�
 - `Transport`(`transport/base.py`)—— HTTP 形态的请求。`CurlCffiTransport` /
   `CdpTransport` / `HybridTransport` 都实现它,业务 client 不感知请求物理上如何发出。
 - `BrowserTransport`(`transport/browsing.py`)—— 驱动真实 UI 的能力
-  (`evaluate` / `navigate` / `send` / `cookies`)。`send_message` 这类必须操作浏览器的
-  路径只依赖这个协议,通过 `cdp_from()` 获取,**不 import 任何具体传输类**
-  (异常也按 `TransportError` 捕获,而不是 `CdpError`)。
+  (`evaluate` / `navigate` / `send` / `cookies`)。`send_message` 的 UI 回退只依赖这个
+  协议,通过 `cdp_from()` 获取,**不 import 任何具体传输类**(异常也按
+  `TransportError` 捕获,而不是 `CdpError`)。
+
+**明确的例外**:`LightspeedSender` 自己管理 WebSocket 会话(连接、warm-up、回执匹配),
+因为网关把请求 id、ack 与 verdict 绑在同一条连接上,拆成"传输 + 客户端"没有意义。
+它的**端点、协议版本、构建 id 与任务名仍是数据**,放在 `routes/lightspeed.py`
+(与 `doc_id` 同样的轮换规则);帧编解码在 `transport/lightspeed.py`。
 
 ### 9.2 routes 与 clients 分离
 
@@ -956,7 +968,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(370 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(374 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -1001,7 +1013,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:369 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:374 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

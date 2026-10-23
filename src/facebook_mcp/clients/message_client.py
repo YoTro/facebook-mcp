@@ -379,13 +379,28 @@ class MessageClient(BaseClient):
             return
         if self._session.source == "bootstrap":
             # The jar is our own cache of an earlier browser login; the browser is
-            # authoritative and has simply moved to another account.
+            # authoritative and has simply moved to another account. Adopting it
+            # only counts if the sync actually happened — with cookie bootstrapping
+            # disabled the session would keep A while the UI sends as B.
             logger.warning(
                 "browser identity changed from c_user=%s to c_user=%s; adopting it",
                 expected,
                 browser_id,
             )
-            self._session.bootstrap_from_browser()
+            if not self._session.bootstrap_from_browser():
+                raise AuthError(
+                    "the cached jar came from a browser login but cannot be refreshed "
+                    "now (cookie bootstrapping is disabled), and the browser is logged "
+                    f"in as c_user={browser_id} instead of {expected}; refusing to send "
+                    "over the UI"
+                )
+            synced = self._session.state.user_id
+            if synced != browser_id:
+                raise AuthError(
+                    "refusing to send over the UI: refreshing the session from the "
+                    f"browser left c_user={synced} while the browser is "
+                    f"c_user={browser_id}"
+                )
             return
 
         account = self._settings.account if self._settings else "?"
@@ -765,31 +780,39 @@ class MessageClient(BaseClient):
         # Re-check immediately before sending, not only before typing.
         self._assert_composer_target(cdp, expected_target, when="before sending")
 
-        # From here on the message may be on the wire. Anything that goes wrong
-        # after this point is an *unobservable* outcome: reporting it as
-        # "not_sent" would invite a duplicate resend.
-        # No send button and no composer means nothing was clicked *and* nothing
-        # was typed: this must stay "not sent", so it happens before the block
-        # where any failure is by definition unobservable.
-        clicked = self._click_send(cdp)
-        if not clicked and self._composer_text(cdp) is None:
-            raise ParseError(
-                "the Messenger composer disappeared before the message could be "
-                "sent; nothing was sent"
-            )
+        # --- submission boundary ---------------------------------------
+        # Everything above is provably "not sent". From here on the question is
+        # only *how far* the submit got, because a false "not_sent" invites the
+        # caller to send the message twice.
+
+        # The click's JS can execute while its CDP reply is lost; that is already
+        # an unobservable outcome, so the call itself needs the boundary.
+        try:
+            clicked = self._click_send(cdp)
+        except TransportError as exc:
+            raise SendUncertainError(
+                "the send click could not be confirmed (the browser may have "
+                f"executed it): {exc}; check the conversation before resending"
+            ) from exc
+
+        if not clicked:
+            # No send button, so nothing has been submitted yet. Enter is only
+            # safe while our composer still exists — otherwise the keystroke
+            # lands on whatever has focus.
+            if self._composer_text(cdp) is None:
+                raise ParseError(
+                    "the Messenger composer disappeared before the message could "
+                    "be sent; nothing was sent"
+                )
+            try:
+                self._press_enter(cdp)
+            except TransportError as exc:
+                raise SendUncertainError(
+                    "Enter was dispatched but its outcome could not be observed "
+                    f"({exc}); check the conversation before resending"
+                ) from exc
 
         try:
-            if not clicked:
-                # No send button. Pressing Enter is only safe while our composer
-                # still exists — otherwise the keystroke lands on whatever has
-                # focus and could trigger something unrelated.
-                if self._composer_text(cdp) is None:
-                    raise ParseError(
-                        "the Messenger composer disappeared before Enter could be "
-                        "pressed; nothing was sent"
-                    )
-                self._press_enter(cdp)
-
             cleared = self._wait_until_cleared(cdp)
             # A rejected message also clears the composer: Messenger moves the
             # text into a bubble and *then* stamps it "Couldn't send", so the

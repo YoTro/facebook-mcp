@@ -198,6 +198,7 @@ facebook-mcp/
 │   │   ├── base.py                  #   Route dataclass + FACEBOOK_BASE / GRAPHQL_PATH
 │   │   ├── rest.py                  #   page entry points (profile / search URLs)
 │   │   ├── graphql.py               #   doc_id + fb_api_req_friendly_name registry
+│   │   ├── lightspeed.py            #   WS gateway endpoint / protocol version / build id / task names
 │   │   └── templates/
 │   │       ├── __init__.py          #   build_search_variables(): template → variables
 │   │       └── search_results.json  #   captured search variables template (42 fields)
@@ -225,7 +226,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 370 tests (all offline)
+└── tests/                           # 374 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # tool registration and schemas
@@ -401,6 +402,11 @@ layer (`base.py` only defines dataclasses).
   `profile_client`; `SEARCH_PEOPLE_PAGE` / `SEARCH_PAGES_PAGE` are **records
   only** (search itself goes through GraphQL and no production code calls them);
   they are kept for navigation and diagnostics.
+- `lightspeed.py` — the **data table** for the Messenger send gateway:
+  `GATEWAY`, `PROTOCOL_VERSION`, `DEFAULT_VERSION_ID` (a build id that rotates
+  like a `doc_id`), `ACCEPT_MARKER` / `REJECT_MARKER`, and `gateway_url()`.
+  The frame format lives in `transport/lightspeed.py`; the session mechanics in
+  `clients/lightspeed_client.py`.
 - `graphql.py` — the `doc_id` registry:
 
   | Route constant | `doc_id` | `friendly_name` | Status |
@@ -427,8 +433,8 @@ layer (`base.py` only defines dataclasses).
 ### 5.5 L3 clients
 
 - `base.py` — `BaseClient(transport, session, settings)`:
-  - `_request()` / `_get()`: merge default + session headers; **decides
-    `transport_hint`**
+  - `_request()` / `_get()`: merge default + session headers; the transport
+    decides routing — clients **no longer set** `transport_hint` (§9.3)
   - `_graphql(route, variables)`: builds the Relay form with `fb_dtsg` / `lsd` /
     **`jazoest` (derived from `fb_dtsg`)**
   - `_ensure_dtsg()`: fetches the home page to fill in missing tokens
@@ -713,8 +719,8 @@ server.search_pages("pest control")
       → payload contains errors → ParseError / AuthError (see §7)
 ```
 
-The `transport_hint` rule decides whether this hop uses curl_cffi or the browser
-(§9.3).
+Which transport serves this hop is decided after `require_auth()` by the
+configuration, not by the credential source (§9.3); search never needs a browser.
 
 ### 6.3 Send a message (protocol first, UI fallback)
 
@@ -840,7 +846,7 @@ configured.
 |---|---|---|
 | `get_user_latest_post_time` / `get_user_recent_posts` | **no** | incognito: 200 with a complete timeline |
 | `search_people` / `search_pages` | **yes** | incognito: 404; anonymous GraphQL rejected |
-| `send_message` | **no, but needs a browser login** | uses Chrome's own session |
+| `send_message` | **yes** | Lightspeed uses the account-store cookie against the gateway; the UI fallback uses Chrome's session and must be the same `c_user` (§5.8) |
 
 **Key structure of the profile HTML** (publicly readable):
 
@@ -1001,10 +1007,17 @@ There are two contracts, not one:
   `CdpTransport` and `HybridTransport` implement it, and business clients have no
   idea how a request physically travels.
 - `BrowserTransport` (`transport/browsing.py`) — the capability to drive a real
-  UI (`evaluate` / `navigate` / `send` / `cookies`). Paths that must operate a
-  browser (e.g. `send_message`) depend only on this protocol, obtained through
-  `cdp_from()`, and import **no concrete transport class** (they catch
-  `TransportError` rather than `CdpError`).
+  UI (`evaluate` / `navigate` / `send` / `cookies`). The UI fallback of
+  `send_message` depends only on this protocol, obtained through `cdp_from()`, and
+  imports **no concrete transport class** (it catches `TransportError`, not
+  `CdpError`).
+
+**Documented exception**: `LightspeedSender` owns its WebSocket session (connect,
+warm-up, ack matching), because the gateway binds request ids, acks and verdicts to
+one connection — splitting it into "transport + client" would buy nothing. Its
+**endpoint, protocol version, build id and task names are still data** in
+`routes/lightspeed.py` (same rotation rule as a `doc_id`); frame encoding lives in
+`transport/lightspeed.py`.
 
 ### 9.2 Routes are separate from clients
 
@@ -1066,7 +1079,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (370), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (374), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1114,7 +1127,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 370 across 21 files (including a CDP integration test against a mock DevTools server)
+- Tests: 374 across 21 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)
@@ -1144,12 +1157,13 @@ layer only forwards, it contains no business logic.
   interface parameters and templates. The recipient is verified before typing,
   and the client refuses to send when it cannot read the name.
 - **Delivery is not provable**: the web UI exposes no server acknowledgement, so
-  `delivery="submitted"` means handed over, not received; `unknown` must be
-  checked in the conversation before retrying. Measured behaviour: Facebook
-  clears the composer first and only then stamps the bubble "Couldn't send"
-  (and that bubble's accessibility label still says "Message sent"), so
-  `rejected` relies on matching UI text — best-effort, and it breaks with a
-  language change or a redesign.
+  `delivery="submitted"` means handed over, not received. `rejected` is reported
+  only when the Lightspeed gateway answers `markOptimisticMessageFailed`; the UI
+  path cannot prove a "Couldn't send" label belongs to *this* message (the text
+  itself may match), so it reports `unknown`. Measured behaviour: Facebook clears
+  the composer first and only then stamps the bubble, while the same bubble's
+  accessibility label still says "Message sent" — UI text is evidence for
+  neither outcome.
 - **Compliance**: authorized accounts only. Marketing messages must comply with
   Facebook's platform policies and anti-spam law (CAN-SPAM, GDPR, …).
 
