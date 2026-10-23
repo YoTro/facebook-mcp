@@ -5,13 +5,19 @@ id and task vocabulary are **data** — the same rule as ``doc_id`` in
 ``routes/graphql.py``: when Facebook ships a new frontend build these values
 rotate, and only this table should change.
 
-Re-capture with::
+Re-capture with the *capture* tool (``lightspeed_probe.py`` is a sender, not a
+sniffer)::
 
-    .venv/bin/python tools/lightspeed_probe.py --account <name>
+    .venv/bin/python tools/sniff.py --account <name> --websocket \
+        --navigate "https://www.facebook.com/messages/t/<thread-id>/" --seconds 20
 
-The wire format (frame layout, protobuf-ish envelope) lives in
-``transport/lightspeed.py``; the session mechanics live in
-``clients/lightspeed_client.py``.
+Frames land in ``.cache/ws-frames/``; the send is the task-46 frame
+(``transport.lightspeed.split_frame`` decodes it).
+
+Layer note: this module holds **data** (endpoint, version id, task markers) and
+the URL template. It imports ``transport.lightspeed`` for the wire-level ``APP_ID``
+only — a downward dependency (routes is L2, transport L1), not a contract with the
+clients or services above it.
 """
 
 from __future__ import annotations

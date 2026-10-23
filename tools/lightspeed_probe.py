@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """Probe Messenger's Lightspeed WebSocket without a browser.
 
-Why this exists: ``send_message`` currently drives the Messenger UI, because the
-send looked un-replayable ("service worker", opaque frames). Capturing the page
-WebSocket showed something else — messages travel as JSON tasks on
+Why this exists: ``send_message`` already uses the protocol (see
+``clients/lightspeed_client.py``); this tool is the manual counterpart, for
+poking at the channel when something needs re-measuring. Recording the page
+WebSocket is what made the protocol visible in the first place — messages travel
+as JSON tasks on
 
     wss://gateway.facebook.com/ws/lightspeed
 
@@ -37,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from facebook_mcp.core.accounts import AccountPaths
-from facebook_mcp.routes.lightspeed import gateway_url
+from facebook_mcp.routes.lightspeed import DEFAULT_VERSION_ID, gateway_url
 from facebook_mcp.services.factory import build_settings
 from facebook_mcp.session.extractor import from_cookie_file
 from facebook_mcp.transport import lightspeed
@@ -67,7 +69,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--version-id",
         default="",
-        help="queue sync version captured from a live frame (empty = unknown)",
+        help=(
+            "client build id sent inside the envelope; defaults to the captured "
+            "constant in routes/lightspeed.py (it was identical across sessions)"
+        ),
+    )
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help=(
+            "send the thread-context fetches first. Not required for a public page "
+            "conversation; one page-owned thread only accepted the send with them"
+        ),
     )
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--dry-run", action="store_true", help="print the frame only")
@@ -78,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     if not uid:
         raise SystemExit("the cookie jar has no c_user")
 
+    version_id = args.version_id or DEFAULT_VERSION_ID
     otid = str(random.getrandbits(63))
     request_id = random.randint(1, 60000)
     body = lightspeed.build_send_body(
@@ -85,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         text=args.text,
         otid=otid,
         request_id=request_id,
-        version_id=args.version_id,
+        version_id=version_id,
         epoch_id=random.getrandbits(63),
         data_trace_id="#" + uuid.uuid4().hex[:22],
     )
@@ -112,6 +126,13 @@ def main(argv: list[str] | None = None) -> int:
         header=[f"Cookie: {cookie_header}", f"User-Agent: {USER_AGENT}"],
     )
     try:
+        if args.warmup:
+            for index, tasks in enumerate(lightspeed.warmup_task_batches(args.thread, uid)):
+                envelope = lightspeed.build_envelope(
+                    tasks, request_id=10 + index, version_id=version_id
+                )
+                ws.send_binary(lightspeed.encode_send(envelope, 10 + index))
+                time.sleep(0.03)
         ws.send_binary(frame)
         print("sent; reading replies…")
         deadline = time.monotonic() + args.seconds

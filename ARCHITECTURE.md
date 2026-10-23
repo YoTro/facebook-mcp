@@ -208,10 +208,11 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 374 项测试(全部离线)
+└── tests/                           # 379 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
-    ├── test_skeleton.py             # 工具注册与 schema
+    ├── test_skeleton.py             # Settings / 异常基类冒烟
+    ├── test_tools_contract.py       # MCP 工具契约(名称/参数/schema)
     ├── test_transport.py            # 本地 HTTP 服务器:重试/节流/错误映射
     ├── test_accounts.py             # 账户库:名称校验、权限、解析优先级、多账号
     ├── test_m2_profile.py           # 抽取、session、路由、主页解析
@@ -353,7 +354,10 @@ class Transport(Protocol):
 
 ### 5.4 L2 routes(逆向产物的落点)
 
-本层是**纯数据 + 数据变换**,不依赖任何其它层(只有 `base.py` 定义数据类)。
+本层是**数据 + 数据变换**,只允许依赖更低的层(`core`、`transport`):
+`routes/lightspeed.py` 需要线路级的 `APP_ID` 与帧常量,因此 import
+`transport.lightspeed` —— 这是 L2→L1 的向下依赖,合法。本层**不依赖** session /
+clients / services,也不承载任何 I/O。
 
 - `base.py` —— `Route(op, method, path, doc_id, friendly_name, requires_auth, anonymous)`。
   `anonymous=True` 表示**不带会话 cookie** 请求:主页就是这种情况 ——
@@ -453,8 +457,10 @@ class Transport(Protocol):
     会被误判为拒绝。
     发送前后各数一次,只有**新增**才算拒绝,避免历史失败污染后续发送;
     同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
-  - **协议优先**:`send()` 先尝试 `LightspeedSender`(WebSocket,无需浏览器);
-    仅在通道不可用时回退到上面的 UI 流程(`FB_MESSAGE_TRANSPORT=auto`)。
+  - **协议优先**:`send()` 先尝试 `LightspeedSender`(WebSocket,无需浏览器)。
+    `auto` 模式下**两类情况**才回退到上面的 UI 流程:通道不可用(连接/握手失败);
+    或网关**明确拒绝**(它已声明未发送,UI 再试不会重复)。
+    `unknown`(丢回执/连接中断)**任何模式都不自动重发**。
     协议路径返回真实 `message_id`,UI 路径没有服务端回执
   - `send_via_graphql()`:页面级 GraphQL mutation **不存在**,保留为显式死路口
 
@@ -673,7 +679,8 @@ server.send_message(recipient="exampleuser", text="...")
 
 ```
 FacebookError                    基类,定义在 core/exceptions.py
-                                 (下列各类除 CdpError 外都在该文件)
+                                 (CdpError 在 transport/cdp.py,
+                                  LightspeedError 在 clients/lightspeed_client.py)
 ├── AuthError                    登录态缺失/失效(fb_dtsg 失效、被要求登录)
 ├── RateLimitError               频率限制(可带 retry_after)
 ├── ChallengeError               验证码/风控检查 —— 已定义,当前代码路径未触发
@@ -683,8 +690,8 @@ FacebookError                    基类,定义在 core/exceptions.py
 │   ├── ParseError               响应结构变化、GraphQL errors、模板过期
 │   └── CdpError                 **定义在 transport/cdp.py**(唯一不在 core),
 │                                 DevTools 协议调用失败
-├── UnsupportedError             该**传输或账号类型**不具备此能力(无浏览器时发消息、Page 身份发起会话)
-├── SendRejectedError            Messenger 明确标记为未发出("Couldn't send")—— 可安全重试
+├── UnsupportedError             该**传输或账号类型**不具备此能力(UI 模式下无浏览器、Page 身份发起会话)
+├── SendRejectedError            网关**明确**把本次消息标为未发出 —— 可安全重试(UI 路径不会抛它)
 └── SendUncertainError           已点击发送但结果无法观测 —— 调用方不得盲目重试
 
 TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/类别不支持
@@ -842,7 +849,8 @@ body = {"app_id":"2220391788200892","payload":"…","request_id":N,"type":3}
 
 实现:`clients/lightspeed_client.py`(连接 → 预热 → 发送 → 解析回执),
 帧编解码在 `transport/lightspeed.py`。`send_message` 现在**协议优先**:
-`FB_MESSAGE_TRANSPORT=auto` 时先走 WebSocket,连不上才回退到 CDP UI 路径;
+`FB_MESSAGE_TRANSPORT=auto` 时先走 WebSocket;**通道不可用或网关明确拒绝**才回退到
+CDP UI 路径(后者不会重复,因为服务器已声明未发送);`unknown` 不会触发回退。
 `ui` 强制旧路径,`lightspeed` 强制协议且禁止回退。协议路径还会带回服务端
 `message_id`,这是 UI 路径拿不到的。
 
@@ -932,7 +940,7 @@ client 是**逻辑**。**接口参数与模板**的变化只改 `routes/`,业务
 
 | 场景 | 通道 |
 |---|---|
-| 公开读(`requires_auth=False`) | curl_cffi,不带 cookie(`credentials="omit"`) |
+| `requires_auth=False` | curl_cffi;**是否带 cookie 由 `Route.anonymous` 决定**(主页 `omit`,取首页 token 的请求仍带 cookie) |
 | 需登录 | `require_auth()` 保证有 jar(缺失时从浏览器引导一次)→ curl_cffi |
 | 浏览器驱动 | 只经由 `cdp_from()` 的路径:cookie 引导、Messenger UI |
 | 发送消息 | `FB_MESSAGE_TRANSPORT`:`lightspeed` / `ui` / `auto`(协议优先,失败回退 UI) |
@@ -968,7 +976,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(374 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(379 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -1013,7 +1021,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:374 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:379 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

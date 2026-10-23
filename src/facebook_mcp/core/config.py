@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     # --- transport -----------------------------------------------------------
     # http: curl_cffi only
     # cdp:  Chrome DevTools only
-    # auto: public reads via http, writes / authenticated ops via cdp
+    # auto: curl_cffi for HTTP work, CDP only where a browser is needed
+    #       (cookie bootstrapping, the Messenger UI fallback)
     transport_mode: Literal["http", "cdp", "auto"] = "auto"
 
     # --- http (curl_cffi) ----------------------------------------------------

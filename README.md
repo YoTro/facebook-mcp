@@ -127,8 +127,9 @@ are pure HTTP.
 FB_TRANSPORT_MODE=auto .venv/bin/facebook-mcp
 ```
 
-Search never goes through the browser once cookies exist — the CDP hint is only
-used when the session has no cookies at all.
+Search never goes through the browser once cookies exist: `require_auth()`
+ensures a jar, and the request then goes over curl_cffi. Clients set no
+transport hint at all — the browser is reached only through `cdp_from()`.
 
 ## Multiple accounts
 
@@ -211,7 +212,7 @@ make check       # main local checks: lint, format, layers, docs, tests, smoke
 | `make fmt-check` | `ruff format --check` |
 | `make layers` | verifies the layered import rules + no cycles |
 | `make docs` | asserts ARCHITECTURE.md and ARCHITECTURE.en.md stay in sync |
-| `make test` | `pytest -q` (374 tests, fully offline) |
+| `make test` | `pytest -q` (379 tests, fully offline) |
 | `make smoke` | MCP stdio handshake + `tools/list` validation |
 | `make test-commits` | validate commit messages on the current branch |
 | `make chrome` / `make chrome-stop` | per-account Chrome: `make chrome ACCOUNT=work` |

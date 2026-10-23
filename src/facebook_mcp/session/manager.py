@@ -29,7 +29,8 @@ class SessionManager:
         self._settings = settings
         self._cookie_provider = cookie_provider
         # True when cookies came from configuration / the account store rather
-        # than the browser. Drives the "protocol first" transport choice.
+        # than the browser. No longer selects the transport (that is "do we have
+        # cookies"); it decides what invalidate() may discard.
         self.from_config = bool(
             settings.cookie
             or settings.cookie_file
@@ -96,8 +97,9 @@ class SessionManager:
             self._discard_persisted()
         elif not self.from_config:
             self._state.cookies.clear()
-        # A jar the user supplied (FB_COOKIE / FB_COOKIE_FILE) is left untouched:
-        # clearing it in memory is enough, and its file is not ours to delete.
+        # A jar the user supplied (FB_COOKIE / FB_COOKIE_FILE) keeps its cookies:
+        # only the rotating tokens are dropped and the session is marked, so the
+        # next authenticated call fails with advice. Its file is not ours to edit.
         logger.info("session invalidated (%s)", self._rejected)
 
     def _discard_persisted(self) -> None:

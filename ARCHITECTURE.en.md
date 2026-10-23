@@ -226,10 +226,11 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 374 tests (all offline)
+└── tests/                           # 379 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
-    ├── test_skeleton.py             # tool registration and schemas
+    ├── test_skeleton.py             # Settings / exception-base smoke
+    ├── test_tools_contract.py       # MCP tool contract (names/args/schemas)
     ├── test_transport.py            # local HTTP server: retry / throttle / error mapping
     ├── test_accounts.py             # account store: names, permissions, resolution, multi-account
     ├── test_m2_profile.py           # extraction, session, routes, profile parsing
@@ -390,8 +391,11 @@ class Transport(Protocol):
 
 ### 5.4 L2 routes (where reverse-engineering output lands)
 
-This layer is **pure data plus data transformation** and depends on no other
-layer (`base.py` only defines dataclasses).
+This layer is **data plus data transformation** and may depend on lower layers
+only (`core`, `transport`): `routes/lightspeed.py` needs the wire-level `APP_ID`
+and frame markers, so it imports `transport.lightspeed` — an L2→L1 downward
+dependency, which the rule allows. It never depends on session / clients /
+services and performs no I/O.
 
 - `base.py` — `Route(op, method, path, doc_id, friendly_name, requires_auth, anonymous)`.
   `anonymous=True` means **no session cookies are sent**: that is the profile
@@ -519,10 +523,12 @@ layer (`base.py` only defines dataclasses).
     an older failure cannot taint a later send. The same bubble's accessibility
     label still says "Message sent", which is why the text cannot be used to
     confirm delivery.
-  - **protocol first**: `send()` tries `LightspeedSender` (WebSocket, no browser)
-    and only falls back to the UI flow above when the channel is unusable
-    (`FB_MESSAGE_TRANSPORT=auto`). The protocol path returns the server's
-    `message_id`; the UI path has no acknowledgement to read
+  - **protocol first**: `send()` tries `LightspeedSender` (WebSocket, no browser).
+    In `auto` mode it falls back to the UI flow above in exactly two cases: the
+    channel is unusable (connect/handshake failure), or the gateway **explicitly
+    rejected** the message (it already said nothing was sent, so the UI probe
+    cannot duplicate). An `unknown` outcome never triggers a fallback. The
+    protocol path returns the server's `message_id`; the UI path has none
   - `send_via_graphql()`: no page-level GraphQL mutation exists, so this stays an
     explicit dead end
 
@@ -755,7 +761,8 @@ server.send_message(recipient="exampleuser", text="...")
 
 ```
 FacebookError                    base class, defined in core/exceptions.py
-                                 (every class below lives there except CdpError)
+                                 (CdpError lives in transport/cdp.py,
+                                  LightspeedError in clients/lightspeed_client.py)
 ├── AuthError                    session missing/expired (fb_dtsg invalid, login demanded)
 ├── RateLimitError               rate limited (may carry retry_after)
 ├── ChallengeError               captcha / risk check — defined, never raised today
@@ -765,7 +772,7 @@ FacebookError                    base class, defined in core/exceptions.py
 │   ├── ParseError               response shape changed, GraphQL errors, stale template
 │   └── CdpError                 **defined in transport/cdp.py** (the only one
 │                                 outside core) — a DevTools protocol call failed
-├── UnsupportedError             transport/account lacks it (no browser, Page chat)
+├── UnsupportedError             transport/account lacks it (UI mode without a browser, Page chat)
 ├── SendRejectedError            Messenger marked it unsent ("Couldn't send") — retry is safe
 └── SendUncertainError           send clicked, outcome unknown — do not blind-retry
 
@@ -888,7 +895,7 @@ curl_cffi; the browser is only needed for one-off cookie bootstrapping.
 |---|---|---|
 | page-level GraphQL mutation | captured `Network.requestWillBeSent` | ❌ only `FBScreenTimeLogger_syncMutation` |
 | legacy REST endpoint | `POST /ajax/mercury/send_messages.php` | ❌ 404 |
-| send is issued by a service worker | subscribed per session, decoded every frame | ❌ **earlier reading was wrong**: the frame belongs to the **page** session |
+| send runs in a child worker | subscribed per session, decoded every frame | ❌ the frame belongs to the **page** session |
 | send travels over the Lightspeed WebSocket | `Network.webSocketFrameSent` + base64 decode | ✅ confirmed |
 
 **Corrected finding**: the message leaves as a **JSON task** on
@@ -931,11 +938,12 @@ In `auto` mode it then tries the UI once — the server already stated the messa
 was *not* sent, so nothing can be duplicated, and the UI distinguishes "restricted
 thread" from "closed inbox". In `lightspeed` mode the refusal is final.
 
-Implementation: `clients/lightspeed_client.py` (connect → warm-up → send → parse the
+Implementation: `clients/lightspeed_client.py` (connect → send → parse the
 verdict), with the codec in `transport/lightspeed.py`. `send_message` is now
 **protocol-first**: with `FB_MESSAGE_TRANSPORT=auto` it tries the WebSocket and
-only falls back to the CDP UI path when the channel is unusable; `ui` forces the
-old path and `lightspeed` forbids the fallback. The protocol path also returns the
+falls back to the CDP UI path when the channel is unusable **or when the gateway
+explicitly refused** the message (nothing was sent, so no duplicate); `unknown`
+never falls back, `ui` forces the old path and `lightspeed` forbids the fallback. The protocol path also returns the
 server's `message_id`, which the UI path cannot obtain.
 
 **The actor type changes the UI**: while acting as a Page, Facebook opens the page
@@ -1039,7 +1047,7 @@ appears only where it is explicitly needed.
 
 | Case | Channel |
 |---|---|
-| public read (`requires_auth=False`) | curl_cffi, no cookies (`credentials="omit"`) |
+| `requires_auth=False` | curl_cffi; **`Route.anonymous` decides whether cookies travel** (profile page omits them, the home-page token fetch still sends them) |
 | login required | `require_auth()` ensures a jar (bootstraps once) → curl_cffi |
 | browser-driven | only through `cdp_from()`: cookie bootstrap, Messenger UI |
 | messaging | `FB_MESSAGE_TRANSPORT`: `lightspeed` / `ui` / `auto` (protocol first, UI fallback) |
@@ -1079,7 +1087,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (374), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (379), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1127,7 +1135,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 374 across 21 files (including a CDP integration test against a mock DevTools server)
+- Tests: 379 across 21 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

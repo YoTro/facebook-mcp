@@ -48,6 +48,12 @@ jobs:
       - name: Layered import rules
         run: python tools/check_layers.py
 
+      - name: Docs structure (CN/EN)
+        run: python tools/check_docs.py
+
+      - name: Stale claims
+        run: python tools/check_claims.py
+
       - name: Documentation parity (CN/EN)
         run: python tools/check_docs.py
 

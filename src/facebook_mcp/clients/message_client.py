@@ -13,8 +13,10 @@ is the only way to start a conversation Facebook will not open over the socket:
 3. insert the text, refusing when the box already holds a draft
 4. click the *"Press enter to send"* button (Enter key as fallback)
 5. classify the outcome: cleared composer = ``submitted``; a new "Couldn't send"
-   label on our bubble = ``rejected``; anything unobservable after the click =
-   ``unknown``. A cleared composer alone is *not* proof of delivery.
+   label on our bubble = ``unknown`` — the DOM cannot prove the label belongs to
+   *our* message (a body that is exactly that text looks identical), and only the
+   gateway may claim ``rejected``. Anything unobservable after the click is
+   ``unknown`` too. A cleared composer alone is *not* proof of delivery.
 
 The third fallback is unavailable to a Page: Facebook does not render the
 profile "Message" button while the session acts as a Page, because a Page
@@ -197,7 +199,7 @@ def _script(body: str) -> str:
 
 
 class MessageClient(BaseClient):
-    """Sends Messenger messages through the logged-in browser."""
+    """Sends Messenger messages: WebSocket protocol first, CDP-driven UI as fallback."""
 
     def __init__(
         self,

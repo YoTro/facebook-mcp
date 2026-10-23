@@ -203,9 +203,10 @@ class CdpTransport(Transport):
     def attach_to_children(self, *, enable_network: bool = True) -> list[dict[str, Any]]:
         """Auto-attach to workers/iframes and return the attached target list.
 
-        Messenger's send is issued by a service worker. A page-level session
-        never reports those requests, so the capture tools have to subscribe to
-        every child target and enable the Network domain *inside* each one.
+        Messenger's send runs in the **page** session, but the sync traffic around
+        it (and every other worker/iframe request) is invisible to a page-level
+        session. Capture therefore subscribes to each child target and enables the
+        Network domain *inside* it.
 
         Flattened mode (``flatten=True``) keeps everything on the page socket and
         tags events with a ``sessionId``.

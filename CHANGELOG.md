@@ -9,6 +9,43 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ## [Unreleased]
 
+### Behaviour summary (final state of this round)
+
+Everything below describes what the code does **now**; earlier entries in this
+section record how it got there and are marked where a conclusion was superseded.
+
+- **Sending**: `send_message` goes over the Messenger sync WebSocket by default
+  (`FB_MESSAGE_TRANSPORT=auto`) and returns the server's `message_id`. The CDP/UI
+  path is a fallback, used when the channel is unusable or when the gateway
+  explicitly refused the message. `unknown` never triggers a fallback and never
+  resends; only `not_sent` and `rejected` are safe to retry.
+- **Delivery states**: `submitted` (accepted; `message_id` on the socket path),
+  `rejected` (**only** a gateway verdict naming our `otid`), `not_sent` (nothing
+  reached Messenger), `unknown` (issued, unobservable — check the conversation).
+  The UI path cannot attribute a "Couldn't send" label, so it never reports
+  `rejected`.
+- **Transport selection**: `require_auth()` guarantees a cookie jar (bootstrapping
+  from the browser once if needed); authenticated reads then go through
+  curl_cffi. Clients set no transport hint. `Route.anonymous` — not
+  `requires_auth` — decides whether cookies travel.
+- **Search classification**: the search *tab* decides the category; only an
+  explicit `Page`/`PageProfile` typename overrides it.
+- **Cookie provenance**: a jar bootstrapped from the browser is persisted to the
+  account store and stays refreshable across restarts; `invalidate()` discards
+  only what this tool wrote.
+
+### Superseded conclusions
+
+Recorded so the history stays readable; these no longer describe the code.
+
+| Earlier conclusion | Final behaviour |
+|---|---|
+| Thread warm-up tasks are required before a send | Thread-specific; `warmup=True` is an option. A public page accepts a bare task 46. |
+| A UI "Couldn't send" marker means `rejected` | The UI reports `unknown`; only the gateway can say `rejected`. |
+| A page result must carry category metadata to count as a Page | The search tab decides; `__typename="User"` is normal for pages. |
+| The send is issued by a service worker | It runs on the page session's WebSocket. |
+| `version_id` must be captured from a live session | It identifies the client build and was identical across captures. |
+
 ### Added
 
 - **`send_message` works without a browser.** Messenger's send is reproducible
@@ -51,9 +88,6 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
   `UnsupportedError`, and the stale test counts (146 / 177) and the CN/EN
   divergences in §6.3 and §7 were corrected. `.env.example` no longer repeats the
   CDP block and documents `FB_ROUTE_DOC_IDS`.
-
-### Changed
-
 - **A suspected UI failure is now `unknown`, not `rejected`.** The DOM cannot
   distinguish a status label from a message whose own body is exactly
   "Couldn't send", and "rejected" promises a retry is safe. Only the gateway's
@@ -62,7 +96,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 - **The Lightspeed channel now follows the same rules as the transports**: it goes
   through `require_auth()` (so an empty store still bootstraps, and a rejected
   session is refused), takes a slot in the shared rate limiter, honours
-  `FB_PROXY` (SOCKS needs PySocks) and uses the configured user agent.
+  `FB_PROXY` (SOCKS via python-socks) and uses the configured user agent.
 - **The protocol sender is built by the composition root**, not by
   `MessageClient`, so the dependency-injection rule holds.
 - **`SessionManager` records the provenance of the loaded jar.** `invalidate()`

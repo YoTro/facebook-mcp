@@ -33,6 +33,12 @@ fmt: ## ruff format (rewrites files)
 fmt-check: ## ruff format --check (what CI enforces)
 	$(PY) -m ruff format --check src tools tests
 
+docs: ## verify the CN/EN documents stay structurally in sync
+	$(PY) tools/check_docs.py
+
+claims: ## verify no stale claims survive in docs/comments
+	$(PY) tools/check_claims.py
+
 layers: ## verify the layered import rules
 	$(PY) tools/check_layers.py
 
