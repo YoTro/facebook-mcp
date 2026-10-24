@@ -226,7 +226,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # protocol probe against the Lightspeed WS
 │   └── launch_chrome_debug.sh       # per-account Chrome with the DevTools port
 │
-└── tests/                           # 379 tests (all offline)
+└── tests/                           # 402 tests (all offline)
     ├── conftest.py                  # points FB_HOME at a temp dir, isolating real credentials
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # Settings / exception-base smoke
@@ -501,7 +501,8 @@ services and performs no I/O.
   - **`SendResult.delivery` distinguishes four states**: `not_sent` (nothing was
     submitted, safe to retry), `submitted` (handed to Messenger, but the web UI
     exposes no server acknowledgement, so a retry may duplicate), `rejected`
-    (Messenger marked it unsent — `SendRejectedError`, safe to retry) and
+    (the **gateway** marked it unsent — `SendRejectedError`, safe to retry; the
+    UI path never raises it) and
     `unknown` (send clicked but the outcome is unobservable: composer vanished, a
     reply was lost, the stream dropped, or the UI spotted a possible failure
     marker — `SendUncertainError`).
@@ -770,13 +771,14 @@ FacebookError                    base class, defined in core/exceptions.py
 ├── TransportError               transport failure
 │   ├── HttpStatusError          non-2xx (4xx/5xx, excluding 404/403/401/429)
 │   ├── ParseError               response shape changed, GraphQL errors, stale template
-│   └── CdpError                 **defined in transport/cdp.py** (the only one
-│                                 outside core) — a DevTools protocol call failed
+│   └── CdpError                 **defined in transport/cdp.py** —
+│                                 a DevTools protocol call failed
 ├── UnsupportedError             transport/account lacks it (UI mode without a browser, Page chat)
 ├── SendRejectedError            Messenger marked it unsent ("Couldn't send") — retry is safe
 └── SendUncertainError           send clicked, outcome unknown — do not blind-retry
 
 TemplateError (routes/templates) — RuntimeError: missing/corrupt/unsupported
+LightspeedError (clients/lightspeed_client.py) — the gateway channel is unusable
 ```
 
 **Translation rules**
@@ -1087,7 +1089,7 @@ layer only forwards, it contains no business logic.
 | M3 | search_client + search_service + MCP tools + variables template | ✅ verified live (pure protocol) |
 | M4 | CDP transport: discovery/connect/execute/cookie bootstrap/event buffering/capture tooling | ✅ verified live |
 | M5 | message_client + message_service + `send_message` | ✅ verified live (browser path) |
-| M6 | Tests (379), README, editable install, CI, MIT license | ✅; PyPI release not done |
+| M6 | Tests (402), README, editable install, CI, MIT license | ✅; PyPI release not done |
 
 ### M1 details
 
@@ -1135,7 +1137,7 @@ layer only forwards, it contains no business logic.
 
 ### M6 details
 
-- Tests: 379 across 21 files (including a CDP integration test against a mock DevTools server)
+- Tests: 402 across 22 files (including a CDP integration test against a mock DevTools server)
 - Layering check: `tools/check_layers.py` prints `upward deps: 0` / `import cycles: 0`
 - Docs: `ARCHITECTURE.md` (zh) / `ARCHITECTURE.en.md` (en) / `README.md` / `CONTRIBUTING.md`
 - CI: `.github/workflows/ci.yml` (lint / multi-version tests / packaging)

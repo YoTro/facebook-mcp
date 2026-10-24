@@ -38,6 +38,7 @@ section record how it got there and are marked where a conclusion was superseded
 
 Recorded so the history stays readable; these no longer describe the code.
 
+<!-- check-claims: allow-superseded -->
 | Earlier conclusion | Final behaviour |
 |---|---|
 | Thread warm-up tasks are required before a send | Thread-specific; `warmup=True` is an option. A public page accepts a bare task 46. |
@@ -45,6 +46,7 @@ Recorded so the history stays readable; these no longer describe the code.
 | A page result must carry category metadata to count as a Page | The search tab decides; `__typename="User"` is normal for pages. |
 | The send is issued by a service worker | It runs on the page session's WebSocket. |
 | `version_id` must be captured from a live session | It identifies the client build and was identical across captures. |
+<!-- /check-claims: allow-superseded -->
 
 ### Added
 

@@ -388,9 +388,10 @@ class CdpTransport(Transport):
     ) -> dict[str, Any]:
         """Send one command, skipping interleaved events, and return its result.
 
-        ``session_id`` addresses an attached child target (a service worker or
-        iframe) in flattened mode. Page sessions cannot see requests issued by a
-        service worker, so capturing a Messenger send requires this.
+        ``session_id`` addresses an attached child target (a worker or iframe) in
+        flattened mode. Page sessions do not report requests issued by workers, so
+        capture subscribes to them; the Messenger send itself stays on the page
+        session.
         """
         ws = self._connect()
         message_id = self._next_id

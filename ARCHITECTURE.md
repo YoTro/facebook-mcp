@@ -208,7 +208,7 @@ facebook-mcp/
 │   ├── lightspeed_probe.py          # Lightspeed WS 协议探针(dry-run/实发)
 │   └── launch_chrome_debug.sh       # 按账号隔离启动带调试端口的 Chrome
 │
-└── tests/                           # 379 项测试(全部离线)
+└── tests/                           # 402 项测试(全部离线)
     ├── conftest.py                  # 把 FB_HOME 指向临时目录,隔离真实凭据
     ├── fixtures/                    # profile_page.html / search_response.json
     ├── test_skeleton.py             # Settings / 异常基类冒烟
@@ -455,7 +455,8 @@ clients / services,也不承载任何 I/O。
     比较前两侧都做空白折叠(`innerText` 保留换行,而 needle 是单行前缀,不折叠会漏报
     多行消息的失败)。早期版本在整条气泡正文里做子串匹配,发送"修好了 Couldn't send 问题"
     会被误判为拒绝。
-    发送前后各数一次,只有**新增**才算拒绝,避免历史失败污染后续发送;
+    发送前后各数一次,只把**新增**的标记当作"可能失败"的信号 —— 但 UI **不能**据此
+    判定 `rejected`(标记可能就是我们自己那条正文),只能报 `unknown`;
     同一气泡的无障碍标签仍写着 "Message sent",所以不能靠读文本来"确认送达"
   - **协议优先**:`send()` 先尝试 `LightspeedSender`(WebSocket,无需浏览器)。
     `auto` 模式下**两类情况**才回退到上面的 UI 流程:通道不可用(连接/握手失败);
@@ -657,7 +658,7 @@ server.send_message(recipient="exampleuser", text="...")
       → resolve_recipient(): username → uid / thread key
       → 协议路径(FB_MESSAGE_TRANSPORT=lightspeed|auto)
           → LightspeedSender.send():require_auth → 共享限速器 → 连接 gateway
-          → task 46 → 读回执
+          → task 46(预热查询可选,仅某些线程类型需要)→ 读回执
               replaceOptimsiticMessage + mid → submitted + message_id
               markOptimisticMessageFailed   → rejected;auto 模式再用 UI 探一次
               无回执/连接中断               → unknown(禁止自动重发)
@@ -688,13 +689,14 @@ FacebookError                    基类,定义在 core/exceptions.py
 ├── TransportError               传输层失败
 │   ├── HttpStatusError          非 2xx(4xx/5xx,不含 404/403/401/429)
 │   ├── ParseError               响应结构变化、GraphQL errors、模板过期
-│   └── CdpError                 **定义在 transport/cdp.py**(唯一不在 core),
+│   └── CdpError                 **定义在 transport/cdp.py**,
 │                                 DevTools 协议调用失败
 ├── UnsupportedError             该**传输或账号类型**不具备此能力(UI 模式下无浏览器、Page 身份发起会话)
 ├── SendRejectedError            网关**明确**把本次消息标为未发出 —— 可安全重试(UI 路径不会抛它)
 └── SendUncertainError           已点击发送但结果无法观测 —— 调用方不得盲目重试
 
 TemplateError (routes/templates) —— RuntimeError 子类:模板缺失/损坏/类别不支持
+LightspeedError (clients/lightspeed_client.py) —— 网关通道不可用(连接/握手失败)
 ```
 
 **翻译规则**
@@ -976,7 +978,7 @@ MCP 层只做转发,不含业务逻辑。
 | M3 | search_client + search_service + MCP 工具 + variables 模板 | ✅ 真机验证(纯协议) |
 | M4 | CDP 传输层:发现/连接/执行/cookie 引导/事件缓冲/抓包工具 | ✅ 真机验证 |
 | M5 | message_client + message_service + `send_message` | ✅ 真机验证(浏览器路径) |
-| M6 | 测试(379 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
+| M6 | 测试(402 项)、README、可编辑安装、CI、MIT License | ✅;PyPI 发布未做 |
 
 ### M1 交付明细
 
@@ -1021,7 +1023,7 @@ MCP 层只做转发,不含业务逻辑。
 
 ### M6 交付明细
 
-- 测试:379 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
+- 测试:402 项,覆盖 21 个文件(含 mock DevTools 服务器的 CDP 集成测试)
 - 分层依赖校验:`tools/check_layers.py` 输出 `upward deps: 0` / `import cycles: 0`
 - 文档:`ARCHITECTURE.md`(中)/ `ARCHITECTURE.en.md`(英)/ `README.md` / `CONTRIBUTING.md`
 - CI:`.github/workflows/ci.yml`(lint / 多版本测试 / 打包校验)

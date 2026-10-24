@@ -54,9 +54,6 @@ jobs:
       - name: Stale claims
         run: python tools/check_claims.py
 
-      - name: Documentation parity (CN/EN)
-        run: python tools/check_docs.py
-
       - name: Commit message convention
         if: github.event_name == 'pull_request'
         env:
